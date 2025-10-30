@@ -1,0 +1,26 @@
+{
+  "name": "ggcacr",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "14.2.8",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "three": "0.160.0",
+    "@react-three/fiber": "8.15.13",
+    "@react-three/drei": "9.105.6",
+    "framer-motion": "11.18.2",
+    "postprocessing": "6.37.8"
+  },
+  "devDependencies": {
+    "typescript": "5.5.4",
+    "@types/react": "18.2.66",
+    "@types/react-dom": "18.2.22"
+  }
+}
