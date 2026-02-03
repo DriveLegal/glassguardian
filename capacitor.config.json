@@ -1,0 +1,13 @@
+{
+  "appId": "com.glassguardian.app",
+  "appName": "Glass Guardian",
+  "webDir": "capacitor_www",
+  "server": {
+    "url": "https://app.glassguardianchipandcrackrepair.com",
+    "cleartext": false,
+    "allowNavigation": [
+      "app.glassguardianchipandcrackrepair.com",
+      "*.glassguardianchipandcrackrepair.com"
+    ]
+  }
+}

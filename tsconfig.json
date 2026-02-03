@@ -1,10 +1,13 @@
 {
   "compilerOptions": {
     "target": "es2022",
-    "lib": ["dom", "dom.iterable", "esnext"],
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
     "module": "esnext",
     "moduleResolution": "bundler",
-
     "allowJs": true,
     "strict": true,
     "noEmit": true,
@@ -12,19 +15,23 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-
-    "jsx": "preserve",
+    "jsx": "react-jsx",
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./*"]
+      "@/*": [
+        "./*"
+      ]
     },
-
     "incremental": true,
-
     /* 👇 This is the key bit for your error */
-    "types": ["node"],
-
-    "plugins": [{ "name": "next" }]
+    "types": [
+      "node"
+    ],
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ]
   },
   "include": [
     "next-env.d.ts",
@@ -32,6 +39,8 @@
     "**/*.tsx",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
-  ],
-  "exclude": ["node_modules"]
+, "scripts/backfillAppUsersEncrypted.mjs"  ],
+  "exclude": [
+    "node_modules"
+  ]
 }

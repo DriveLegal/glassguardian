@@ -1,6 +1,19 @@
 /* =========================================================
+   Tailwind v4 base + plugins (must be first)
+   ========================================================= */
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+@plugin "tailwindcss-animate";
+
+/* =========================================================
    Reset / base
    ========================================================= */
+
+/* Tailwind v4 dark variant helper:
+   - previous: &:is(.dark *)  (too narrow)
+   - now:      &:where(.dark, .dark *)  (matches root .dark and its descendants)
+*/
+@custom-variant dark (&:where(.dark, .dark *));
 * { box-sizing: border-box; }
 html, body { padding: 0; margin: 0; height: 100%; }
 a { color: inherit; text-decoration: none; }
@@ -9,6 +22,48 @@ html { scroll-behavior: smooth; }
 
 /* Guard against stray top margins creating a phantom gap */
 body > * { margin-top: 0 !important; }
+
+/* =========================================================
+   Root scroll container & anchor safety
+   ========================================================= */
+html, body {
+  overflow-y: auto;           /* <-- make root the scroller */
+  overflow-x: hidden;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  overscroll-behavior-y: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Let anchor jumps & scrollIntoView stop below fixed header */
+html { scroll-padding-top: var(--header-h, 72px); }
+section[id] { scroll-margin-top: var(--header-h, 72px); }
+
+/* Fluid media */
+img, picture, svg, canvas, iframe, video {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  object-fit: contain;
+}
+
+/* Containers stay within viewport; prevent text blowouts */
+.gradient-border, .card-glass, .card-glass-solid {
+  box-sizing: border-box;
+  max-width: 100%;
+  width: 100%;
+  overflow-wrap: break-word;
+}
+
+/* Allow grid children (e.g., CrackOut canvas) to shrink */
+.two-col > *, .two-col-avoid > *, .two-col-specialties > * { min-width: 0; }
+
+/* Touch polish */
+button, a {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  cursor: pointer;
+}
 
 /* =========================================================
    Tokens
@@ -20,13 +75,15 @@ body > * { margin-top: 0 !important; }
   --glass-border: 0.22;
 
   --text: #e8ecff;
-  --muted: #9aa4c7;
+  --muted: oklch(0.97 0 0);
 
-  --accentA: #60a5fa;
-  --accentB: #a78bfa;
-  --accentC: #34d399;
+  /* Accent system */
+  --accent: #2563eb;         /* primary solid accent (blue-600) */
+  --accentA: #60a5fa;        /* glow 1  */
+  --accentB: #3b82f6;        /* glow 2  */
+  --accentC: #1d4ed8;        /* glow 3  */
 
-  --ring: 0 0 0 2px rgba(96,165,250,0.45);
+  --ring: oklch(0.708 0 0);
 
   --shadow-umbra: 0 6px 12px rgba(6, 15, 30, 0.16);
   --shadow-penumbra: 0 22px 44px rgba(6, 15, 30, 0.12);
@@ -36,11 +93,130 @@ body > * { margin-top: 0 !important; }
 
   /* live-updated by Header.tsx */
   --header-h: 72px;
+
+  /* next/font variable for Quicksand (set in layout.tsx) */
+  --font-quicksand: system-ui, sans-serif;
+
+  /* Tailwind design tokens (mapped via @theme inline below) */
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --chart-1: oklch(0.646 0.222 41.116);
+  --chart-2: oklch(0.6 0.118 184.704);
+  --chart-3: oklch(0.398 0.07 227.392);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+/* Dark token set */
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+/* Map CSS vars into Tailwind tokens */
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
 }
 
 /* =========================================================
-   Background
+   Background + global typography
    ========================================================= */
+html, body { 
+  font-family: Verdana, Geneva, sans-serif; 
+}
+
+@media (max-width: 768px) {
+  html, body { font-family: var(--font-quicksand), system-ui, sans-serif; }
+}
+
 body {
   background:
     radial-gradient(1200px 800px at 50% -200px, #1a2040 0%, transparent 70%),
@@ -49,13 +225,18 @@ body {
   color: var(--text);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* Helps native controls match dark UI (inputs, selects, etc.) */
+  color-scheme: dark;
 }
+
+/* Optional: scopeable dark form control hint for specific areas */
+.gg-admin-dark * { color-scheme: dark; }
 
 /* =========================================================
    Header (fixed) + page offset
    ========================================================= */
 .gg-header {
-  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  position: fixed; top: 0; left: 0; right: 0; z-index: 5; /* above fades & main */
   backdrop-filter: blur(16px);
   background: linear-gradient(to bottom, rgba(8,12,28,0.85), rgba(8,12,28,0.45), transparent);
   border-bottom: 1px solid rgba(255,255,255,0.10);
@@ -89,27 +270,39 @@ main { padding-top: calc(var(--header-h) + 4px); } /* tiny breathing room */
 .gg-nav a { color: var(--muted); padding: 8px 12px; border-radius: 12px; }
 .gg-nav a.active, .gg-nav a:hover { color: #fff; background: rgba(255,255,255,0.08); }
 
-/* Right actions */
+/* Right actions + Buttons */
 .gg-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+/* Brand button */
 .gg-btn {
-  padding: 10px 14px; border-radius: 12px; font-weight: 600;
-  border: 1px solid rgba(255,255,255,0.20);
-  background: linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.05));
-  box-shadow: var(--shadow-umbra);
-  transition: transform .15s ease, box-shadow .2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-weight: 800;
+  background: var(--accent) !important; /* solid accent */
+  color: #fff !important;
+  border: none !important;
+  box-shadow: 0 6px 16px rgba(0,0,0,0.18);
+  transition: transform .15s ease, box-shadow .20s ease, filter .2s ease;
 }
-.gg-btn:hover { transform: translateY(-1px); box-shadow: var(--shadow-umbra), var(--shadow-penumbra); }
+.gg-btn:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(0,0,0,0.22); filter: brightness(1.02); }
 .gg-btn:active { transform: translateY(0); }
-.gg-btn:focus-visible { outline: none; box-shadow: var(--ring); }
+.gg-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent), white 40%); }
+
+/* Optional “glass” alt style */
+.gg-btn.alt {
+  background: linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.05)) !important;
+  color: var(--text) !important;
+  border: 1px solid rgba(255,255,255,0.20) !important;
+}
 
 /* =========================================================
    Sections / hero — scoped ONLY to our Section component
    ========================================================= */
-.gg-section {
-  padding: 72px 20px;
-  scroll-margin-top: var(--header-h);
-}
-.section-inner { max-width: 1100px; margin: 0 auto; }
+.gg-section { padding: 72px 20px; scroll-margin-top: var(--header-h); }
+.section-inner { max-width: 1100px; margin: 0 auto; width: 100%; }
 .section-title {
   font-size: clamp(28px, 3vw, 42px);
   font-weight: 800; letter-spacing: -0.02em; margin: 0 0 14px;
@@ -120,22 +313,19 @@ main { padding-top: calc(var(--header-h) + 4px); } /* tiny breathing room */
 .gg-section.hero { padding-top: 12px; }
 
 /* =========================================================
-   Scroll progress / fades
+   Fades / stacking (progress bar is defined in page.tsx)
    ========================================================= */
-.scroll-progress {
-  position: fixed; top: 0; left: 0; height: 3px; width: 100%;
-  background: linear-gradient(90deg, var(--accentA), var(--accentB), var(--accentC));
-  transform-origin: 0 50%; z-index: 140; /* above header */
-  will-change: transform;
-}
 .fade-top {
-  position: fixed; top: 0; left: 0; right: 0; height: 48px; z-index: 105; pointer-events: none;
+  position: fixed; top: 0; left: 0; right: 0; height: 48px; z-index: 2; pointer-events: none;
   background: linear-gradient(to bottom, rgba(11,16,32,1), rgba(11,16,32,0));
 }
 .fade-bottom {
-  position: fixed; bottom: 0; left: 0; right: 0; height: 120px; z-index: 50; pointer-events: none;
+  position: fixed; bottom: 0; left: 0; right: 0; height: 120px; z-index: 2; pointer-events: none;
   background: linear-gradient(to top, rgba(11,16,32,1), rgba(11,16,32,0));
 }
+
+/* Ensure content paints above the fixed background & fades */
+main { position: relative; z-index: 3; }
 
 /* Tabs */
 .gg-tab {
@@ -197,7 +387,7 @@ main { padding-top: calc(var(--header-h) + 4px); } /* tiny breathing room */
 }
 
 /* =========================================================
-   Sticky Schedule Tab + panel
+   Sticky Schedule / Booking Tab
    ========================================================= */
 .scheduler {
   position: fixed; right: 0; top: 40%; transform: translateY(-50%);
@@ -250,9 +440,9 @@ main { padding-top: calc(var(--header-h) + 4px); } /* tiny breathing room */
    Reduced motion
    ========================================================= */
 @media (prefers-reduced-motion: reduce) {
-  .scroll-progress { display: none; }
   .gg-btn, .scheduler-tab, .scheduler-panel { transition: none; }
 }
+
 /* Keep seasonal layer fixed and non-layout (belt & suspenders) */
 .seasonal-layer {
   position: fixed !important;
@@ -261,11 +451,9 @@ main { padding-top: calc(var(--header-h) + 4px); } /* tiny breathing room */
   pointer-events: none !important;
 }
 
-/* Ensure content paints above the fixed background */
-main { position: relative; z-index: 1; }
-
 /* Make sure the sticky booking CTA sits above header/fades */
 .scheduler { z-index: 150; isolation: isolate; }
+
 /* ===== Sticky Booking: sexy vertical tab ===== */
 .sb-tab {
   position: fixed;
@@ -400,4 +588,100 @@ main { position: relative; z-index: 1; }
 @media (prefers-reduced-motion: reduce) {
   .sb-shimmer, .sb-glow { animation: none; }
   .sb-tab { transition: none; }
+}
+
+/* Header: compact + scrollable center nav on small screens */
+@media (max-width:640px){
+  .gg-header-inner{
+    grid-template-columns: auto 1fr auto; /* keep grid, shrink gaps */
+    gap: 10px;
+    padding: 10px 14px;
+  }
+  .gg-logo-link .logo-badge{ height: 34px; padding: 4px 8px; }
+  .logo-text{ font-size: 12px; }
+
+  /* center nav row becomes horizontal scroller */
+  .gg-nav{
+    gap: 10px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    mask-image: linear-gradient(to right, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%);
+  }
+  .gg-nav::-webkit-scrollbar{ display:none; }
+
+  .gg-nav a{ padding: 6px 10px; border-radius: 10px; font-size: 13px; white-space: nowrap; }
+}
+
+/* =============================
+   Global Font Rules (already consolidated above)
+   ============================= */
+
+/* =========================================================
+   Mobile-first tightening (kept from your original)
+   ========================================================= */
+@media (max-width: 640px) {
+  .card-glass {
+    padding: 16px !important;
+    border-radius: 16px !important;
+    box-shadow:
+      0 2px 12px rgba(0,0,0,.18),
+      inset 0 0 0 1px rgba(255,255,255,.16) !important;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .two-col, .two-col-avoid, .two-col-specialties {
+    display: grid;
+    grid-template-columns: 1fr !important;
+    gap: 12px;
+  }
+
+  .auto-grid {
+    display: grid;
+    grid-template-columns: 1fr !important;
+    gap: 12px !important;
+  }
+
+  .pricing-grid { gap: 18px; }
+  .tight-list { line-height: 1.8; }
+  .section-title { font-size: clamp(20px, 6vw, 26px); margin-bottom: 6px; }
+  .section-sub { font-size: 14px; line-height: 1.6; opacity: .9; }
+}
+:root {
+  --glass-edge: rgba(255,255,255,0.06);
+}
+
+/* crisp 3D image helpers */
+.image-3d {
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
+  -webkit-font-smoothing: antialiased;
+  image-rendering: -webkit-optimize-contrast;
+}
+
+/* reduced motion fallback */
+@media (prefers-reduced-motion: reduce) {
+  .image-3d,
+  .glass-card,
+  .sidebar * {
+    transition: none !important;
+    transform: none !important;
+  }
+}
+/* --- FIX DayPicker unicode arrows --- */
+.rdp-nav_button {
+  color: rgb(125 211 252) !important;          /* sky-300 */
+}
+
+.rdp-nav_button span {
+  color: rgb(125 211 252) !important;          /* sky-300 */
+}
+
+.rdp-nav_button:hover span {
+  color: rgb(56 189 248) !important;           /* sky-400 */
+}
+
+.rdp-nav_button:hover {
+  color: rgb(56 189 248) !important;
 }
