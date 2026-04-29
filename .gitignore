@@ -12,6 +12,9 @@ out/
 dist/
 .vercel/
 
+# TypeScript build artefacts
+tsconfig.tsbuildinfo
+
 # Environment files
 .env
 .env.local
