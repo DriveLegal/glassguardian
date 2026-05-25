@@ -943,7 +943,7 @@ export default function AdminInsurancePage() {
           )}
 
           {!invoicesQ.isLoading && !invoicesQ.isError && filtered.length > 0 && (
-            <div className="space-y-4">
+            <div className="space-y-6">
               <AnimatePresence initial={false}>
                 {filtered.map((inv) => {
                   const badge = statusBadge(inv.status);
@@ -962,8 +962,8 @@ export default function AdminInsurancePage() {
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, y: 10 }}
                       transition={{ duration: 0.18 }}
-                      className="rounded-3xl border border-white/10 bg-slate-950/45 p-4 shadow-[0_18px_45px_rgba(2,6,23,0.38)] ring-1 ring-white/[0.03] transition-all hover:-translate-y-0.5 hover:border-sky-300/20 hover:bg-slate-950/60 hover:shadow-[0_22px_60px_rgba(2,6,23,0.52)] md:p-5"
-                    >
+                      className="relative rounded-[2rem] border border-sky-300/20 bg-gradient-to-br from-slate-950/90 via-slate-950/70 to-slate-900/55 p-4 shadow-[0_22px_70px_rgba(0,0,0,0.55)] ring-1 ring-sky-200/10 transition-all duration-200 before:absolute before:inset-x-6 before:-top-px before:h-px before:bg-gradient-to-r before:from-transparent before:via-sky-300/55 before:to-transparent hover:-translate-y-1 hover:border-sky-300/35 hover:bg-slate-950/80 hover:shadow-[0_28px_90px_rgba(14,165,233,0.18)] md:p-5"
+>
                       <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                         <div className="min-w-0 space-y-3 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
