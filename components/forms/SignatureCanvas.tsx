@@ -19,9 +19,17 @@ import { Eraser, PenLine, Undo2 } from "lucide-react";
  * ✅ Reliable resize (re-renders from stored strokes)
  * ✅ Cropped export (tight signature PNG instead of full blank canvas)
  * ✅ Controlled-mode safe (won’t wipe signature on pointer up)
+ *
+ * Supports BOTH:
+ * 1) New controlled API:
+ *    - valueDataUrl / onChangeDataUrl
+ * 2) Existing app usage:
+ *    - value / onChange
+ * 3) Legacy save-button API:
+ *    - onSave
  */
 
-type ControlledProps = {
+type ControlledDataUrlProps = {
   valueDataUrl: string | null;
   onChangeDataUrl: (dataUrl: string | null) => void;
   disabled?: boolean;
@@ -30,27 +38,36 @@ type ControlledProps = {
   showSaveButton?: false;
   disclaimer?: string;
   className?: string;
-  exportCropped?: boolean; // default true
-  syncDebounceMs?: number; // default 260
+  exportCropped?: boolean;
+  syncDebounceMs?: number;
+};
+
+type ControlledSimpleProps = {
+  value: string | null;
+  onChange: (dataUrl: string | null) => void;
+  disabled?: boolean;
+  heightPx?: number;
+  label?: string;
+  showSaveButton?: false;
+  disclaimer?: string;
+  className?: string;
+  exportCropped?: boolean;
+  syncDebounceMs?: number;
 };
 
 type LegacyProps = {
-  onSave: (dataUrl: string) => void;
+  onSave?: (dataUrl: string) => void;
   disclaimer?: string;
   disabled?: boolean;
   heightPx?: number;
   label?: string;
   showSaveButton?: true;
   className?: string;
-  exportCropped?: boolean; // default true
-  syncDebounceMs?: number; // default 260
+  exportCropped?: boolean;
+  syncDebounceMs?: number;
 };
 
-type Props = ControlledProps | LegacyProps;
-
-function isControlled(p: Props): p is ControlledProps {
-  return "onChangeDataUrl" in p;
-}
+type Props = ControlledDataUrlProps | ControlledSimpleProps | LegacyProps;
 
 type PtT = { x: number; y: number; t: number };
 type Stroke = { pts: PtT[] };
@@ -59,14 +76,28 @@ function clamp(n: number, a: number, b: number) {
   return Math.max(a, Math.min(b, n));
 }
 
+function isControlledDataUrlProps(p: Props): p is ControlledDataUrlProps {
+  return "onChangeDataUrl" in p;
+}
+
+function isControlledSimpleProps(p: Props): p is ControlledSimpleProps {
+  return "onChange" in p && !("onSave" in p);
+}
+
+function isLegacyProps(p: Props): p is LegacyProps {
+  return !isControlledDataUrlProps(p) && !isControlledSimpleProps(p);
+}
+
 export default function SignatureCanvas(props: Props) {
-  const controlled = isControlled(props);
-  const controlledProps: ControlledProps | null = controlled ? props : null;
-  const legacyProps: LegacyProps | null = !controlled ? (props as LegacyProps) : null;
+  const controlledDataUrlProps = isControlledDataUrlProps(props) ? props : null;
+  const controlledSimpleProps = isControlledSimpleProps(props) ? props : null;
+  const legacyProps = isLegacyProps(props) ? props : null;
+
+  const isControlled = !!controlledDataUrlProps || !!controlledSimpleProps;
 
   const disabled = props.disabled ?? false;
   const heightPx = props.heightPx ?? 170;
-  const label = props.label ?? "Draw signature (optional)";
+  const label = props.label ?? "Draw signature";
   const disclaimer = props.disclaimer;
   const className = props.className ?? "";
   const exportCropped = props.exportCropped ?? true;
@@ -75,7 +106,6 @@ export default function SignatureCanvas(props: Props) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const ctxRef = React.useRef<CanvasRenderingContext2D | null>(null);
 
-  // Stored strokes (undo + redraw on resize)
   const strokesRef = React.useRef<Stroke[]>([]);
   const activeStrokeRef = React.useRef<Stroke | null>(null);
 
@@ -85,12 +115,28 @@ export default function SignatureCanvas(props: Props) {
 
   const [isEmpty, setIsEmpty] = React.useState(true);
 
-  // Controlled-mode: prevent repaint loops / wiping
   const lastEmittedUrlRef = React.useRef<string | null>(null);
-
-  // Debounced controlled sync
   const syncTimer = React.useRef<number | null>(null);
   const pendingSync = React.useRef(false);
+
+  const externalValue = controlledDataUrlProps
+    ? controlledDataUrlProps.valueDataUrl ?? null
+    : controlledSimpleProps
+      ? controlledSimpleProps.value ?? null
+      : null;
+
+  const emitControlledChange = React.useCallback(
+    (dataUrl: string | null) => {
+      if (controlledDataUrlProps) {
+        controlledDataUrlProps.onChangeDataUrl(dataUrl);
+        return;
+      }
+      if (controlledSimpleProps) {
+        controlledSimpleProps.onChange(dataUrl);
+      }
+    },
+    [controlledDataUrlProps, controlledSimpleProps]
+  );
 
   const getBundle = React.useCallback(() => {
     const canvas = canvasRef.current;
@@ -113,18 +159,17 @@ export default function SignatureCanvas(props: Props) {
     const { canvas, ctx } = bundle;
 
     const dpr = window.devicePixelRatio || 1;
-
     const css = getCssSize();
+
     const targetW = Math.max(1, Math.floor(css.w * dpr));
     const targetH = Math.max(1, Math.floor(css.h * dpr));
+
     if (canvas.width !== targetW || canvas.height !== targetH) {
       canvas.width = targetW;
       canvas.height = targetH;
     }
 
-    // Draw in CSS px
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
     ctx.strokeStyle = "rgba(226,232,240,0.95)";
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
@@ -154,11 +199,10 @@ export default function SignatureCanvas(props: Props) {
     const dy = cur.y - prev.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
     const dt = Math.max(1, cur.t - prev.t);
-    const v = dist / dt; // px/ms
+    const v = dist / dt;
 
     const minW = 1.6;
     const maxW = 4.2;
-
     const vn = clamp(v / 1.0, 0, 1.2);
     const raw = maxW - (maxW - minW) * vn;
 
@@ -169,15 +213,19 @@ export default function SignatureCanvas(props: Props) {
     return smoothed;
   }, []);
 
-  const drawDot = React.useCallback((pt: PtT, radius: number) => {
-    const bundle = getBundle();
-    if (!bundle) return;
-    const { ctx } = bundle;
-    ctx.beginPath();
-    ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
-    ctx.fillStyle = String(ctx.strokeStyle);
-    ctx.fill();
-  }, [getBundle]);
+  const drawDot = React.useCallback(
+    (pt: PtT, radius: number) => {
+      const bundle = getBundle();
+      if (!bundle) return;
+      const { ctx } = bundle;
+
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = String(ctx.strokeStyle);
+      ctx.fill();
+    },
+    [getBundle]
+  );
 
   const drawSegment = React.useCallback(
     (prev: PtT, cur: PtT) => {
@@ -235,7 +283,12 @@ export default function SignatureCanvas(props: Props) {
     if (!canvas) return null;
 
     const strokes = strokesRef.current;
-    if (!strokes.length) return null;
+    if (!strokes.length) {
+      try {
+        if (!exportCropped) return canvas.toDataURL("image/png");
+      } catch {}
+      return null;
+    }
 
     if (!exportCropped) {
       try {
@@ -245,10 +298,10 @@ export default function SignatureCanvas(props: Props) {
       }
     }
 
-    let minX = Infinity,
-      minY = Infinity,
-      maxX = -Infinity,
-      maxY = -Infinity;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
 
     for (const s of strokes) {
       for (const p of s.pts) {
@@ -270,7 +323,6 @@ export default function SignatureCanvas(props: Props) {
     const cropH = clamp(maxY - minY + pad * 2, 1, css.height - cropY);
 
     const dpr = window.devicePixelRatio || 1;
-
     const sx = Math.floor(cropX * dpr);
     const sy = Math.floor(cropY * dpr);
     const sw = Math.ceil(cropW * dpr);
@@ -296,7 +348,8 @@ export default function SignatureCanvas(props: Props) {
     tmp.width = sw;
     tmp.height = sh;
     const tctx = tmp.getContext("2d");
-    if (!tctx) return null;
+    if (!tctx || !imageData) return null;
+
     tctx.putImageData(imageData, 0, 0);
 
     try {
@@ -307,15 +360,15 @@ export default function SignatureCanvas(props: Props) {
   }, [exportCropped]);
 
   const flushControlledSyncNow = React.useCallback(() => {
-    if (!controlledProps) return;
+    if (!isControlled) return;
     const url = exportDataUrl();
     lastEmittedUrlRef.current = url;
-    controlledProps.onChangeDataUrl(url);
-  }, [controlledProps, exportDataUrl]);
+    emitControlledChange(url);
+  }, [emitControlledChange, exportDataUrl, isControlled]);
 
   const scheduleControlledSync = React.useCallback(
     (delayMs: number) => {
-      if (!controlledProps) return;
+      if (!isControlled) return;
 
       pendingSync.current = true;
 
@@ -327,10 +380,10 @@ export default function SignatureCanvas(props: Props) {
 
         const url = exportDataUrl();
         lastEmittedUrlRef.current = url;
-        controlledProps.onChangeDataUrl(url);
+        emitControlledChange(url);
       }, delayMs);
     },
-    [controlledProps, exportDataUrl]
+    [emitControlledChange, exportDataUrl, isControlled]
   );
 
   const clear = React.useCallback(() => {
@@ -343,11 +396,17 @@ export default function SignatureCanvas(props: Props) {
     clearDeviceCanvas();
     setIsEmpty(true);
 
-    if (controlledProps) {
-      lastEmittedUrlRef.current = null;
-      controlledProps.onChangeDataUrl(null);
+    if (syncTimer.current) {
+      window.clearTimeout(syncTimer.current);
+      syncTimer.current = null;
     }
-  }, [clearDeviceCanvas, controlledProps]);
+    pendingSync.current = false;
+
+    if (isControlled) {
+      lastEmittedUrlRef.current = null;
+      emitControlledChange(null);
+    }
+  }, [clearDeviceCanvas, emitControlledChange, isControlled]);
 
   const undo = React.useCallback(() => {
     const strokes = strokesRef.current;
@@ -361,12 +420,12 @@ export default function SignatureCanvas(props: Props) {
 
     redrawAll();
 
-    if (controlledProps) {
+    if (isControlled) {
       const url = exportDataUrl();
       lastEmittedUrlRef.current = url;
-      controlledProps.onChangeDataUrl(url);
+      emitControlledChange(url);
     }
-  }, [controlledProps, exportDataUrl, redrawAll]);
+  }, [emitControlledChange, exportDataUrl, isControlled, redrawAll]);
 
   const resize = React.useCallback(() => {
     const canvas = canvasRef.current;
@@ -395,7 +454,6 @@ export default function SignatureCanvas(props: Props) {
 
   const paintDataUrl = React.useCallback(
     async (dataUrl: string | null) => {
-      // Reset strokes because we cannot reconstruct from bitmap.
       strokesRef.current = [];
       activeStrokeRef.current = null;
       isDrawing.current = false;
@@ -437,19 +495,25 @@ export default function SignatureCanvas(props: Props) {
   );
 
   React.useEffect(() => {
-    if (!controlledProps) return;
+    if (!isControlled) return;
 
-    const incoming = controlledProps.valueDataUrl ?? null;
+    const incoming = externalValue ?? null;
 
-    // if drawing, don't repaint
     if (isDrawing.current) return;
 
-    // ignore values we emitted
     if (incoming && lastEmittedUrlRef.current && incoming === lastEmittedUrlRef.current) return;
     if (!incoming && !lastEmittedUrlRef.current) return;
 
     paintDataUrl(incoming);
-  }, [controlledProps, paintDataUrl]);
+  }, [externalValue, isControlled, paintDataUrl]);
+
+  React.useEffect(() => {
+    return () => {
+      if (syncTimer.current) {
+        window.clearTimeout(syncTimer.current);
+      }
+    };
+  }, []);
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (disabled) return;
@@ -517,7 +581,7 @@ export default function SignatureCanvas(props: Props) {
     lastPtRef.current = null;
     lastWidthRef.current = 2.6;
 
-    if (controlledProps) flushControlledSyncNow();
+    if (isControlled) flushControlledSyncNow();
   };
 
   const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -538,11 +602,13 @@ export default function SignatureCanvas(props: Props) {
   const saveLegacy = () => {
     if (!legacyProps) return;
     const url = exportDataUrl();
-    if (url) legacyProps.onSave(url);
+    if (url && typeof legacyProps.onSave === "function") {
+      legacyProps.onSave(url);
+    }
   };
 
   const showSave =
-    (!controlledProps && (props.showSaveButton === true || props.showSaveButton === undefined));
+    !isControlled && (props.showSaveButton === true || props.showSaveButton === undefined);
 
   const canUndo = strokesRef.current.length > 0;
 
@@ -602,7 +668,9 @@ export default function SignatureCanvas(props: Props) {
           />
         </div>
 
-        <p className="text-xs text-slate-400 pt-2">Tip: if you skip drawing, we’ll record a typed signature.</p>
+        <p className="text-xs text-slate-400 pt-2">
+          Draw with finger or mouse. Signature saves as a cropped PNG.
+        </p>
       </motion.div>
 
       {disclaimer && (
@@ -616,7 +684,7 @@ export default function SignatureCanvas(props: Props) {
         </motion.div>
       )}
 
-      {!controlledProps && showSave && (
+      {showSave && (
         <div className="flex gap-3">
           <motion.div whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} className="flex-1">
             <Button
@@ -634,7 +702,7 @@ export default function SignatureCanvas(props: Props) {
             <Button
               type="button"
               onClick={saveLegacy}
-              disabled={disabled || isEmpty}
+              disabled={disabled || isEmpty || !legacyProps?.onSave}
               className="w-full h-12 font-semibold bg-emerald-500 hover:bg-emerald-600 text-slate-950 shadow-[0_12px_35px_rgba(16,185,129,0.18)]"
             >
               SAVE

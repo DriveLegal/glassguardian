@@ -1,22 +1,17 @@
-// app/api/appointments/[id]/waiver/route.ts
+//app/api/appointmetns/[id]/wiaver/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { headers as nextHeaders } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import {
   buildGlassGuardianWaiverText,
   WAIVER_VERSION,
 } from "@/lib/waivers/glassGuardianWaiver";
 
-/**
- * appointment_waivers columns (expected):
- * id, appointment_id, signer_role, signer_name, signer_email, initials,
- * signature_name, waiver_version, waiver_text, signed_ip, signed_user_agent,
- * signed_at, created_at,
- * + signature_png_path (recommended)  <-- stored in bucket "waivers"
- */
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/* =========================
+   Helpers
+========================= */
 
 function isoDateInTZ(d: Date, timeZone: string) {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -25,7 +20,6 @@ function isoDateInTZ(d: Date, timeZone: string) {
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(d);
-
   const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
@@ -53,29 +47,154 @@ function normalizeEmail(v: any) {
   return s && s !== "null" && s !== "undefined" ? s : "";
 }
 
+function getClientIp(req: NextRequest) {
+  const xff = req.headers.get("x-forwarded-for");
+  if (xff) return xff.split(",")[0]?.trim() || null;
+  return req.headers.get("x-real-ip") || null;
+}
+
 function getBearerToken(req: NextRequest) {
   const h = req.headers.get("authorization") || "";
   const m = h.match(/^Bearer\s+(.+)$/i);
   return m?.[1]?.trim() || "";
 }
 
-/**
- * ✅ Tech override:
- * If caller is authenticated AND their email is assigned as technician_email on the appointment,
- * we allow signing BEFORE the scheduled day.
- *
- * Customer portal signing can still happen any time (also allowed).
- *
- * Net result:
- * - tech device signing: allowed any time (but still must be authed)
- * - customer portal signing: allowed any time (but still must be authed)
- */
-export async function POST(
-  req: NextRequest,
-  context: { params: Promise<{ id: string }> }
-) {
+function safeJsonParse(s: string) {
   try {
-    const { id: appointmentId } = await context.params;
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
+function base64UrlToUtf8(input: string) {
+  // base64url -> base64
+  const b64 = input.replace(/-/g, "+").replace(/_/g, "/");
+  // pad
+  const pad = b64.length % 4 ? "=".repeat(4 - (b64.length % 4)) : "";
+  const out = Buffer.from(b64 + pad, "base64").toString("utf8");
+  return out;
+}
+
+/**
+ * ✅ Robust extraction:
+ * Handles:
+ * - sb-access-token (legacy)
+ * - sb-<ref>-auth-token (common)
+ *   value may be:
+ *   - JSON
+ *   - URI-encoded JSON
+ *   - "base64-<base64url(json)>"
+ *   - quoted variants of all above
+ */
+function getAccessTokenFromCookies(req: NextRequest) {
+  // legacy
+  const legacy = req.cookies.get("sb-access-token")?.value;
+  if (legacy && legacy.trim()) return legacy.trim();
+
+  const cookies = (req.cookies.getAll?.() ?? []) as any[];
+
+  const authCookies = cookies.filter((c) => {
+    const name = String(c?.name || "");
+    return name.startsWith("sb-") && name.endsWith("-auth-token");
+  });
+
+  for (const c of authCookies) {
+    const raw0 = String(c?.value ?? "");
+    if (!raw0) continue;
+
+    const candidates: string[] = [];
+
+    // raw
+    candidates.push(raw0);
+
+    // quoted raw
+    if (raw0.startsWith('"') && raw0.endsWith('"')) {
+      candidates.push(raw0.slice(1, -1));
+    }
+
+    // decodeURIComponent variants
+    try {
+      candidates.push(decodeURIComponent(raw0));
+    } catch {}
+    if (raw0.startsWith('"') && raw0.endsWith('"')) {
+      try {
+        candidates.push(decodeURIComponent(raw0.slice(1, -1)));
+      } catch {}
+    }
+
+    for (const cand0 of candidates) {
+      const cand = String(cand0 || "").trim();
+      if (!cand) continue;
+
+      // case: base64-<base64url(json)>
+      if (cand.startsWith("base64-")) {
+        const payload = cand.slice("base64-".length);
+        try {
+          const jsonStr = base64UrlToUtf8(payload);
+          const j = safeJsonParse(jsonStr);
+          const t = j?.access_token;
+          if (typeof t === "string" && t.trim()) return t.trim();
+        } catch {}
+      }
+
+      // case: direct JSON
+      const j1 = safeJsonParse(cand);
+      const t1 = j1?.access_token;
+      if (typeof t1 === "string" && t1.trim()) return t1.trim();
+
+      // case: maybe it is base64/base64url JSON without prefix
+      // (we only try decode if it looks base64-ish and doesn't contain spaces)
+      const looksB64ish =
+        cand.length > 40 &&
+        !cand.includes("{") &&
+        !cand.includes("}") &&
+        !cand.includes(" ") &&
+        /^[A-Za-z0-9+/_=-]+$/.test(cand);
+
+      if (looksB64ish) {
+        // try base64url decode
+        try {
+          const jsonStr = base64UrlToUtf8(cand);
+          const j = safeJsonParse(jsonStr);
+          const t = j?.access_token;
+          if (typeof t === "string" && t.trim()) return t.trim();
+        } catch {}
+        // try standard base64 decode
+        try {
+          const jsonStr = Buffer.from(cand, "base64").toString("utf8");
+          const j = safeJsonParse(jsonStr);
+          const t = j?.access_token;
+          if (typeof t === "string" && t.trim()) return t.trim();
+        } catch {}
+      }
+    }
+  }
+
+  return "";
+}
+
+async function resolveParamsId(context: any): Promise<string> {
+  try {
+    const p = context?.params;
+    if (!p) return "";
+    if (typeof p?.then === "function") {
+      const awaited = await p;
+      return String(awaited?.id ?? "").trim();
+    }
+    return String(p?.id ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+/* =========================
+   Route
+========================= */
+
+export async function POST(req: NextRequest, context: any) {
+  try {
+    const appointmentId = await resolveParamsId(context);
 
     if (!appointmentId) {
       return NextResponse.json({ error: "Missing appointment id." }, { status: 400 });
@@ -92,13 +211,33 @@ export async function POST(
       );
     }
 
-    const headerStore = (await (nextHeaders() as any)) as any;
+    const body = await req.json().catch(() => null);
 
-    // ✅ Auth: bearer token (tech + user portals can send this)
-    const token = getBearerToken(req);
+    const tokenFromAuthHeader = getBearerToken(req);
+    const tokenFromAltHeader = (req.headers.get("x-supabase-token") || "").trim();
+    const tokenFromBody = String(body?.access_token ?? "").trim();
+    const tokenFromCookies = getAccessTokenFromCookies(req);
+
+    const token =
+      tokenFromAuthHeader || tokenFromAltHeader || tokenFromBody || tokenFromCookies;
+
+    // ✅ safe debug (no secrets)
+    const cookieNames = (req.cookies.getAll?.() ?? []).map((c: any) => String(c?.name || ""));
+    const debug = {
+      hasAuthHeader: Boolean(req.headers.get("authorization")),
+      hasAltHeader: Boolean(req.headers.get("x-supabase-token")),
+      hasBodyToken: Boolean(tokenFromBody),
+      cookieCount: cookieNames.length,
+      cookieNames: cookieNames.slice(0, 6), // safe
+      hasSbAccessCookie: Boolean(req.cookies.get("sb-access-token")?.value),
+      hasSbAuthCookie: cookieNames.some((n) => n.startsWith("sb-") && n.endsWith("-auth-token")),
+      tokenLength: token ? token.length : 0,
+      routeAppointmentId: appointmentId,
+    };
+
     if (!token) {
       return NextResponse.json(
-        { error: "Not authenticated. Missing Authorization bearer token." },
+        { error: "Not authenticated. Missing Authorization bearer token.", debug },
         { status: 401 }
       );
     }
@@ -110,13 +249,12 @@ export async function POST(
 
     const { data: authData, error: authErr } = await authed.auth.getUser();
     if (authErr || !authData?.user) {
-      return NextResponse.json({ error: "Not authenticated." }, { status: 401 });
+      return NextResponse.json({ error: "Not authenticated.", debug }, { status: 401 });
     }
 
     const user = authData.user;
     const authedEmail = normalizeEmail(user.email);
-
-    const body = await req.json().catch(() => null);
+    void authedEmail;
 
     const signer_name = String(body?.full_name ?? body?.signer_name ?? "").trim();
     const initialsRaw = String(body?.initials ?? "").trim();
@@ -142,10 +280,7 @@ export async function POST(
 
     const initials = initialsRaw.toUpperCase();
 
-    /**
-     * ✅ We need technician_email for override.
-     * If your schema uses a different column name, change it here.
-     */
+    // ✅ confirm appointment exists (RLS via authed client)
     const { data: appt, error: apptErr } = await authed
       .from("appointments")
       .select("id, customer_email, scheduled_date, technician_email")
@@ -160,58 +295,35 @@ export async function POST(
     }
 
     const tz = "America/Los_Angeles";
-
-    // ✅ Decide if caller is the assigned tech
-    const assignedTechEmail = normalizeEmail((appt as any)?.technician_email);
-    const isAssignedTech =
-      !!assignedTechEmail && !!authedEmail && assignedTechEmail === authedEmail;
-
-    // ✅ Day-of rule: ENFORCE only if NOT assigned tech
-    // (You asked: tech override, user can sign ahead of time too)
-    // So: actually we allow ANY authenticated signing, regardless of date.
-    // But if you still want a rule for random users, keep a soft guard:
-    //
-    // We'll allow ALWAYS for authed users, but keep a sanity check if scheduled_date exists.
     const apptDay = appt?.scheduled_date ? String(appt.scheduled_date).slice(0, 10) : null;
     const today = isoDateInTZ(new Date(), tz);
-
-    // ✅ No more blocking — both customer + tech can sign ahead of time
-    // (keeping variables for logging/debug if needed)
     void apptDay;
     void today;
-    void isAssignedTech;
 
-    // Capture IP + UA (best-effort)
-    const ip =
-      headerStore.get?.("x-forwarded-for")?.split(",")[0]?.trim() ||
-      headerStore.get?.("x-real-ip") ||
-      null;
-    const ua = headerStore.get?.("user-agent") || null;
+    const ip = getClientIp(req);
+    const ua = req.headers.get("user-agent") || null;
 
     const waiver_text =
       typeof body?.waiver_text === "string" && body.waiver_text.trim().length
         ? body.waiver_text
         : buildGlassGuardianWaiverText({
-            repairAmount: 60,
+            repairAmount: 70,
             customerName: signer_name,
-            timeZone: tz,
           });
 
-    // ✅ Service role for: duplicate check, upload, insert, appointment update
+    // ✅ service role for duplicate check, upload, insert, appointment update
     const admin = createClient(supabaseUrl, serviceKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
-    // Prevent duplicates
     const { data: existing, error: existErr } = await admin
       .from("appointment_waivers")
       .select("id")
       .eq("appointment_id", appointmentId)
       .maybeSingle();
 
-    if (existErr) {
-      return NextResponse.json({ error: existErr.message }, { status: 400 });
-    }
+    if (existErr) return NextResponse.json({ error: existErr.message }, { status: 400 });
+
     if (existing?.id) {
       return NextResponse.json(
         { error: "Waiver already signed for this appointment." },
@@ -219,7 +331,6 @@ export async function POST(
       );
     }
 
-    // Upload drawn signature to Storage if provided
     let signature_png_path: string | null = null;
 
     if (signature_type === "drawn") {
@@ -228,9 +339,7 @@ export async function POST(
       }
 
       const { bytes, contentType } = dataUrlToBytes(signature_payload);
-
-      const maxBytes = 1_500_000;
-      if (bytes.length > maxBytes) {
+      if (bytes.length > 1_500_000) {
         return NextResponse.json(
           { error: "Signature image is too large. Please try again." },
           { status: 413 }
@@ -247,9 +356,7 @@ export async function POST(
         cacheControl: "3600",
       });
 
-      if (up.error) {
-        return NextResponse.json({ error: up.error.message }, { status: 400 });
-      }
+      if (up.error) return NextResponse.json({ error: up.error.message }, { status: 400 });
     }
 
     const computedEmail =

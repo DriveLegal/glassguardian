@@ -1162,7 +1162,7 @@ export default function IOSBookAppointmentPage() {
                 </div>
 
                 <p className="mt-2 text-[11px] text-slate-400">
-                  Operating hours: 7:00 AM – 5:00 PM (local time).
+                  Operating hours: 7:00 AM – 8:00 PM (local time).
                 </p>
               </div>
             </div>

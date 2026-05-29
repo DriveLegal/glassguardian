@@ -1,0 +1,10 @@
+.git
+.next
+.vercel
+.safelite-screenshots
+node_modules
+npm-debug.log
+.env
+.env.*
+tmp
+public/envs

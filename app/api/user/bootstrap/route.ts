@@ -80,14 +80,14 @@ function buildJsonResponse(
 ) {
   const res = NextResponse.json(payload, { status });
 
-  const secure = shouldUseSecureCookies(req);
+  const secureDefault = shouldUseSecureCookies(req);
 
   for (const c of cookiesToSet) {
+    // ✅ CRITICAL: preserve Supabase cookie flags (especially httpOnly)
+    // Only supply safe defaults if a flag is missing.
     res.cookies.set(c.name, c.value, {
       ...(c.options ?? {}),
-      // ✅ do NOT force httpOnly=true (breaks JS cookie strategy in dev)
-      httpOnly: c.options?.httpOnly ?? false,
-      secure: c.options?.secure ?? secure,
+      secure: c.options?.secure ?? secureDefault,
       sameSite: c.options?.sameSite ?? "lax",
       path: c.options?.path ?? "/",
     });
@@ -101,7 +101,6 @@ export async function POST(req: NextRequest) {
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   const service = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  // Collect cookies Supabase wants to set, then attach to *every* response.
   const cookiesToSet: CookieToSet[] = [];
 
   if (!supabaseUrl || !anon) {

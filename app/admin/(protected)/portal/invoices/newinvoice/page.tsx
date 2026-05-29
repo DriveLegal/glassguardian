@@ -3,106 +3,67 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import {
-  useQuery,
-  useMutation,
-  useQueryClient,
-} from "@tanstack/react-query";
-import { motion, AnimatePresence } from "framer-motion";
-
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabaseClient } from "@/lib/supabaseClient";
+import { motion } from "framer-motion";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
-import { Badge } from "@/components/ui/badge";
-import { Switch } from "@/components/ui/switch";
+import { Separator } from "@/components/ui/separator";
 
 import {
-  ArrowLeft,
-  MoreVertical,
-  Plus,
-  Minus,
   MapPin,
   Mail,
-  Phone,
+  Printer,
+  ArrowLeft,
   Calendar,
-  Car,
+  ShieldCheck,
+  Sparkles,
+  Loader2,
   FileText,
-  Clock,
+  Send,
+  CheckCircle,
+  User as UserIcon,
+  Car,
+  AlertCircle,
+  Wrench,
 } from "lucide-react";
 
-import VehicleImageDisplay from "@/components/VehicleImageDisplay";
-import CarTopView from "@/components/tech/CarTopView";
-import DamageTypeSelector from "@/components/tech/DamageTypeSelector";
-import SignatureCanvas from "@/components/tech/SignatureCanvas";
-
-/* ---------- Constants ---------- */
-
-const SERVICE_CATEGORIES = [
-  {
-    id: "rni_rnr",
-    label: "R&I / R&R",
-    icon: "🔧",
-    color: "from-blue-400 to-blue-500",
-  },
-  {
-    id: "parts",
-    label: "PARTS",
-    icon: "⚙️",
-    color: "from-purple-400 to-purple-500",
-  },
-  {
-    id: "glass",
-    label: "GLASS",
-    icon: "✨",
-    color: "from-green-400 to-green-500",
-  },
-  {
-    id: "misc",
-    label: "MISC",
-    icon: "📋",
-    color: "from-orange-400 to-orange-500",
-  },
-];
-
-const PAYMENT_METHODS = [
-  { value: "credit_card", label: "Credit Card" },
-  { value: "check", label: "Check" },
-  { value: "offline_credit_card", label: "Offline Credit Card" },
-  { value: "cash", label: "Cash" },
-  { value: "other", label: "Other" },
-];
-
-const GLASS_LOCATIONS = [
-  { id: "windshield", label: "WINDSHIELD" },
-  { id: "lt_front_door", label: "LT FRONT DOOR" },
-  { id: "rt_front_door", label: "RT FRONT DOOR" },
-  { id: "sunroof", label: "SUNROOF" },
-  { id: "lt_rear_door", label: "LT REAR DOOR" },
-  { id: "rt_rear_door", label: "RT REAR DOOR" },
-];
+import { ServicesPerformed } from "@/components/tech/invoice/ServicesPerformed";
+const ServicesPerformedAny = ServicesPerformed as any;
+import { WindshieldRepairMap } from "@/components/tech/invoice/WindshieldRepairMap";
 
 /* ---------- Types ---------- */
 
 type AnyObj = Record<string, any>;
 
-type Client = {
+type TechInvoice = {
+  id: string;
+  services_json: any | null;
+  windshield_repairs_json: any[] | null;
+  technician_email: string | null;
+  vehicle_id: string | null;
+  invoice_date: string | null;
+  status: string | null;
+
+  customer_email?: string | null;
+  service_address?: string | null;
+  appointment_snapshot?: any | null;
+
+  invoice_number?: string | null;
+
+  discount_percent?: number | null;
+  discount_cents?: number | null;
+  tax_rate_percent?: number | null;
+  tax_cents?: number | null;
+  subtotal_cents?: number | null;
+  total_cents?: number | null;
+};
+
+type ClientRow = {
   id: string;
   full_name: string | null;
   phone: string | null;
@@ -112,10 +73,9 @@ type Client = {
   state: string | null;
   zip: string | null;
   notes?: string | null;
-  created_by_tech?: string | null;
 };
 
-type Vehicle = {
+type ClientVehicleRow = {
   id: string;
   client_id: string;
   year: number | null;
@@ -129,1501 +89,981 @@ type Vehicle = {
   trim?: string | null;
 };
 
+/* ---------- Helpers ---------- */
+
+function addYears(dateStr: string | null | undefined, years: number): string | null {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return null;
+  d.setFullYear(d.getFullYear() + years);
+  return d.toISOString().split("T")[0];
+}
+
+function cx(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
+
+function todayISO() {
+  return new Date().toISOString().split("T")[0];
+}
+
+// Mirrors your tech behavior (unique + stable)
+function makeInvoiceNumber() {
+  return `INV-${Date.now()}`;
+}
+
 /* ---------- Page ---------- */
 
 export default function AdminNewInvoicePage() {
   const router = useRouter();
   const queryClient = useQueryClient();
 
+  // Mirror tech page: DO NOT create row on mount.
+  const [invoice, setInvoice] = React.useState<TechInvoice | null>(null);
+
   const [adminEmail, setAdminEmail] = React.useState<string | null>(null);
-  const [technicianEmail, setTechnicianEmail] = React.useState<string>("");
+  const [technicianEmail, setTechnicianEmail] = React.useState<string>(""); // admin override -> technician_email on invoice
+  const [authReady, setAuthReady] = React.useState(false);
 
-  const [selectedClient, setSelectedClient] = React.useState<Client | null>(
-    null
-  );
-  const [selectedVehicle, setSelectedVehicle] =
-    React.useState<Vehicle | null>(null);
+  const [totalsSnapshot, setTotalsSnapshot] = React.useState<{
+    subtotalDollars: number;
+    discountDollars: number;
+    taxDollars: number;
+    totalDollars: number;
+  } | null>(null);
 
-  const [activeGlassView, setActiveGlassView] = React.useState<
-    "visual" | "list"
-  >("visual");
-  const [glassMode, setGlassMode] = React.useState<
-    "flat" | "panel" | "repair"
-  >("repair");
-  const [activeRepairTab, setActiveRepairTab] = React.useState<
-    "quadrant" | "type" | "resin" | "notes"
-  >("quadrant");
+  // Admin selects client + vehicle (mirrors tech “customer+vehicle selection”)
+  const [selectedClientId, setSelectedClientId] = React.useState<string>("");
+  const [selectedVehicleId, setSelectedVehicleId] = React.useState<string>("");
 
-  const [invoiceData, setInvoiceData] = React.useState({
-    rni_rnr_total: 0,
-    parts_total: 0,
-    glass_total: 0,
-    misc_total: 0,
-    discount_percent: 20,
-    tax_rate: 0,
-    payment_method: "",
-    payment_note: "",
-  });
+  // mirror tech “manual email override”
+  const [selectedCustomerEmail, setSelectedCustomerEmail] = React.useState<string>("");
 
-  const [glassRepairs, setGlassRepairs] = React.useState<
-    Record<string, any[]>
-  >({});
-  const [currentGlassLocation, setCurrentGlassLocation] =
-    React.useState<string>("windshield");
-  const [currentRepair, setCurrentRepair] = React.useState({
-    quadrant: "",
-    damage_type: "",
-    crack_length_inches: 0,
-    notes: "",
-    is_previous_repair: false,
-    improve_severe: false,
-  });
+  const [localServiceAddress, setLocalServiceAddress] = React.useState<string>("");
+  const [localNotes, setLocalNotes] = React.useState<string>("");
+  const [localInvoiceDate, setLocalInvoiceDate] = React.useState<string>(todayISO());
 
-  const [signature, setSignature] = React.useState<string>("");
-  const [showPayment, setShowPayment] = React.useState(false);
-  const [paymentMode, setPaymentMode] = React.useState<
-    "credit_card" | "offline"
-  >("credit_card");
-
-  /* ---------- Auth: admin only ---------- */
+  /* ---------- Auth: admin only (table-backed) ---------- */
 
   React.useEffect(() => {
-    let mounted = true;
-    (async () => {
-      const { data } = await supabaseClient.auth.getSession();
-      const session = data?.session ?? null;
-      if (!mounted) return;
+    let alive = true;
 
-      const user = session?.user;
-      const role =
-        (user?.app_metadata as AnyObj)?.role ||
-        (user?.user_metadata as AnyObj)?.role;
+    async function verifyAdminByEmail(email: string) {
+      const { data, error } = await supabaseClient
+        .from("admins")
+        .select("role, is_active")
+        .eq("email", email)
+        .maybeSingle();
 
-      if (!user || !role || !["admin", "support"].includes(String(role))) {
-        router.replace(
-          `/admin/login?redirect=${encodeURIComponent(
-            "/admin/portal/invoices/newinvoice"
-          )}`
-        );
+      if (!alive) return;
+
+      const ok =
+        !error &&
+        !!data &&
+        data.is_active === true &&
+        (data.role === "admin" || data.role === "support");
+
+      if (!ok) {
+        router.replace(`/admin/login?redirect=${encodeURIComponent("/admin/portal/invoices/newinvoice")}`);
         return;
       }
 
-      const email = user.email ?? null;
       setAdminEmail(email);
-      setTechnicianEmail(email ?? "");
+      setTechnicianEmail(email); // default tech assignment = admin email (can override)
+      setAuthReady(true);
+    }
+
+    (async () => {
+      const { data: sessData } = await supabaseClient.auth.getSession();
+      const user = sessData?.session?.user ?? null;
+      const email = user?.email ?? null;
+
+      if (!alive) return;
+
+      if (!user || !email) {
+        await new Promise((r) => setTimeout(r, 150));
+        if (!alive) return;
+
+        const { data: sessData2 } = await supabaseClient.auth.getSession();
+        const user2 = sessData2?.session?.user ?? null;
+        const email2 = user2?.email ?? null;
+
+        if (!user2 || !email2) {
+          router.replace(`/admin/login?redirect=${encodeURIComponent("/admin/portal/invoices/newinvoice")}`);
+          return;
+        }
+
+        await verifyAdminByEmail(email2);
+        return;
+      }
+
+      await verifyAdminByEmail(email);
     })();
 
     return () => {
-      mounted = false;
+      alive = false;
     };
   }, [router]);
 
-  /* ---------- Queries ---------- */
+  /* ---------- Queries (mirrors tech pattern) ---------- */
 
-  // All clients (admin can see across techs)
-  const { data: clients = [], isLoading: loadingClients } = useQuery({
-    queryKey: ["admin-clients"],
+  const {
+    data: clients,
+    isLoading: loadingClients,
+    error: clientsErr,
+  } = useQuery({
+    queryKey: ["admin:newinvoice:clients"],
+    enabled: authReady,
     queryFn: async () => {
       const { data, error } = await supabaseClient
         .from("clients")
-        .select(
-          "id, full_name, phone, email, address_line1, city, state, zip, notes, created_by_tech"
-        )
+        .select("id, full_name, phone, email, address_line1, city, state, zip, notes")
         .order("full_name", { ascending: true });
-
       if (error) throw error;
-      return (data ?? []) as Client[];
+      return (data ?? []) as ClientRow[];
     },
-    staleTime: 10_000,
+    staleTime: 30_000,
   });
 
-  // Vehicles for selected client
-  const { data: clientVehicles = [] } = useQuery({
-    queryKey: ["admin-client-vehicles", selectedClient?.id],
-    enabled: !!selectedClient?.id,
+  const selectedClient: ClientRow | null = React.useMemo(() => {
+    if (!clients || !selectedClientId) return null;
+    return clients.find((c) => c.id === selectedClientId) ?? null;
+  }, [clients, selectedClientId]);
+
+  const {
+    data: clientVehicles,
+    isLoading: loadingVehicles,
+    error: vehiclesErr,
+  } = useQuery({
+    queryKey: ["admin:newinvoice:client_vehicles", selectedClientId],
+    enabled: authReady && !!selectedClientId,
     queryFn: async () => {
       const { data, error } = await supabaseClient
         .from("client_vehicles")
-        .select(
-          "id, client_id, year, make, model, color, vin, stock_ro, license_plate, vehicle_type, trim"
-        )
-        .eq("client_id", selectedClient!.id)
+        .select("id, client_id, year, make, model, color, vin, stock_ro, license_plate, vehicle_type, trim")
+        .eq("client_id", selectedClientId)
         .order("year", { ascending: false });
-
       if (error) throw error;
-      return (data ?? []) as Vehicle[];
+      return (data ?? []) as ClientVehicleRow[];
     },
+    staleTime: 30_000,
   });
 
-  // Latest invoice number (from tech_invoices)
-  const { data: latestInvoice, isLoading: loadingLatestInvoice } = useQuery({
-    queryKey: ["admin-tech-invoices:latest"],
-    queryFn: async () => {
-      const { data, error } = await supabaseClient
-        .from("tech_invoices")
-        .select("invoice_number")
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+  /* ---------- Create Draft (ONLY on click) ---------- */
 
-      if (error) throw error;
-      return data as { invoice_number: string } | null;
-    },
-    staleTime: 10_000,
-  });
-
-  const getNextInvoiceNumber = React.useCallback(() => {
-    if (!latestInvoice?.invoice_number) return "0001";
-    const last = parseInt(latestInvoice.invoice_number, 10);
-    if (Number.isNaN(last)) return "0001";
-    return String(last + 1).padStart(4, "0");
-  }, [latestInvoice]);
-
-  /* ---------- Helpers ---------- */
-
-  const getAllRepairs = () => Object.values(glassRepairs).flat();
-
-  const calculateTotals = React.useCallback(() => {
-    const subtotal =
-      (invoiceData.rni_rnr_total || 0) +
-      (invoiceData.parts_total || 0) +
-      (invoiceData.glass_total || 0) +
-      (invoiceData.misc_total || 0);
-
-    const discountAmount =
-      subtotal * ((invoiceData.discount_percent || 0) / 100);
-    const afterDiscount = subtotal - discountAmount;
-    const taxAmount = afterDiscount * ((invoiceData.tax_rate || 0) / 100);
-    const total = afterDiscount + taxAmount;
-
-    return { subtotal, discountAmount, taxAmount, total };
-  }, [invoiceData]);
-
-  const { subtotal, discountAmount, taxAmount, total } = calculateTotals();
-
-  const handleClientSelect = (clientId: string) => {
-    const client = clients.find((c) => c.id === clientId) || null;
-    setSelectedClient(client);
-    setSelectedVehicle(null);
-  };
-
-  const handleAddRepairToLocation = () => {
-    if (!currentRepair.quadrant || !currentRepair.damage_type) {
-      alert("Please select quadrant and damage type");
-      return;
-    }
-
-    setGlassRepairs((prev) => ({
-      ...prev,
-      [currentGlassLocation]: [
-        ...(prev[currentGlassLocation] || []),
-        { ...currentRepair, location: currentGlassLocation },
-      ],
-    }));
-
-    setCurrentRepair({
-      quadrant: "",
-      damage_type: "",
-      crack_length_inches: 0,
-      notes: "",
-      is_previous_repair: false,
-      improve_severe: false,
-    });
-  };
-
-  const toCents = (n: number) => Math.round((n || 0) * 100);
-
-  /* ---------- Persist Invoice (admin -> tech_invoices) ---------- */
-
-  const createInvoiceMutation = useMutation({
+  const createDraftMutation = useMutation({
     mutationFn: async () => {
-      if (!adminEmail) throw new Error("Not signed in as admin");
-      if (!selectedClient?.id) throw new Error("Client required");
+      if (!adminEmail) throw new Error("Missing admin session email.");
 
-      const effectiveTechEmail =
-        technicianEmail?.trim() || adminEmail || null;
+      const effectiveTechEmail = technicianEmail?.trim() || adminEmail;
+      if (!effectiveTechEmail) throw new Error("Technician email required.");
 
-      if (!effectiveTechEmail) {
-        throw new Error("Technician email is required");
-      }
+      const defaultServices = {
+        chip_count: 0,
+        small_crack_count: 0,
+        insurance_covered: false,
+        rni_rnr_total: 0,
+        parts_total: 0,
+        misc_total: 0,
+        glass_total: 0,
+      };
 
-      const { total } = calculateTotals();
-      const invoiceNumber = getNextInvoiceNumber();
+      const invoice_number = makeInvoiceNumber();
 
-      const payload = {
-        invoice_number: invoiceNumber,
+      const resolvedCustomerEmail =
+        (selectedCustomerEmail || selectedClient?.email || "").trim() || null;
+
+      const resolvedServiceAddress =
+        localServiceAddress?.trim() ||
+        (selectedClient?.address_line1
+          ? `${selectedClient.address_line1}${selectedClient.city ? `, ${selectedClient.city}` : ""}${
+              selectedClient.state ? `, ${selectedClient.state}` : ""
+            }${selectedClient.zip ? ` ${selectedClient.zip}` : ""}`
+          : "") ||
+        null;
+
+      const payload: AnyObj = {
+        invoice_number,
+        status: "draft",
+        invoice_date: localInvoiceDate || todayISO(),
+        services_json: defaultServices,
+        windshield_repairs_json: [],
+        subtotal_cents: 0,
+        discount_percent: null,
+        discount_cents: 0,
+        tax_rate_percent: null,
+        tax_cents: 0,
+        total_cents: 0,
+
         technician_email: effectiveTechEmail,
-        client_id: selectedClient.id,
-        vehicle_id: selectedVehicle?.id ?? null,
-        invoice_date: new Date().toISOString().split("T")[0],
-        status: signature ? "paid" : "draft",
 
-        services_json: {
-          rni_rnr_total: invoiceData.rni_rnr_total,
-          parts_total: invoiceData.parts_total,
-          glass_total: invoiceData.glass_total,
-          misc_total: invoiceData.misc_total,
+        // mirror tech fields
+        customer_email: resolvedCustomerEmail,
+        vehicle_id: selectedVehicleId || null,
+        service_address: resolvedServiceAddress,
+        appointment_snapshot: {
+          notes_customer: localNotes || null,
+          admin_created: true,
+          admin_email: adminEmail,
+          client_id: selectedClientId || null,
         },
 
-        windshield_repairs_json: getAllRepairs(),
-
-        subtotal_cents: toCents(subtotal),
-        discount_percent: invoiceData.discount_percent,
-        discount_cents: toCents(discountAmount),
-        tax_rate_percent: invoiceData.tax_rate,
-        tax_cents: toCents(taxAmount),
-        total_cents: toCents(total),
-
-        payment_method: invoiceData.payment_method || null,
-        payment_note: invoiceData.payment_note || null,
-
-        customer_signature: signature || null,
-
-        // Optional: flag as admin-created for future analytics
+        // Optional analytics flag (if your table has it)
         created_by_admin_email: adminEmail,
+        client_id: selectedClientId || null, // if your tech_invoices has this column; safe if exists
       };
+
+      // IMPORTANT: if your tech_invoices table does NOT have client_id, remove the line above.
+      // If it errors in your env, delete `client_id` from payload.
 
       const { data, error } = await supabaseClient
         .from("tech_invoices")
         .insert(payload)
-        .select("id")
+        .select(
+          "id, invoice_number, services_json, windshield_repairs_json, technician_email, vehicle_id, invoice_date, status, customer_email, service_address, subtotal_cents, discount_percent, discount_cents, tax_rate_percent, tax_cents, total_cents, appointment_snapshot"
+        )
         .single();
 
-      if (error) throw error;
-      return data.id as string;
+      if (error) {
+        console.error("[Admin NewInvoice] insert tech_invoices error:", error);
+        throw error;
+      }
+
+      return data as TechInvoice;
     },
-    onSuccess: (newId: string) => {
-      queryClient.invalidateQueries({
-        queryKey: ["admin-tech-invoices:latest"],
-      });
-      queryClient.invalidateQueries({
-        queryKey: ["admin:tech_invoices"],
-      });
-      router.push(`/admin/portal/invoices/invoice/${newId}`);
+    onSuccess: (row) => {
+      setInvoice(row);
+      queryClient.invalidateQueries({ queryKey: ["admin:tech_invoices"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-tech-invoices:latest"] });
     },
   });
 
-  const DISCLAIMER =
-    "I have inspected my vehicle(s) and am satisfied that GLASS GUARDIAN CHIP AND CRACK REPAIR has completed repairs to my satisfaction. I understand if the repairs were ever to fail, GLASS GUARDIAN CHIP AND CRACK REPAIR provides a 2 year money back guarantee; This warranty applies only to repairs marked on invoice and completed by GLASS GUARDIAN CHIP AND CRACK REPAIR.";
+  /* ---------- Meta updater (ONLY if invoice exists) ---------- */
 
-  /* ---------- UI ---------- */
+  const updateMetaMutation = useMutation({
+    mutationFn: async (patch: Partial<TechInvoice> & { technician_email?: string | null }) => {
+      if (!invoice?.id) throw new Error("Missing invoice id");
+
+      const { error } = await supabaseClient
+        .from("tech_invoices")
+        .update({
+          ...("customer_email" in patch ? { customer_email: patch.customer_email } : null),
+          ...("vehicle_id" in patch ? { vehicle_id: patch.vehicle_id } : null),
+          ...("service_address" in patch ? { service_address: patch.service_address } : null),
+          ...("invoice_date" in patch ? { invoice_date: patch.invoice_date } : null),
+          ...("appointment_snapshot" in patch ? { appointment_snapshot: patch.appointment_snapshot } : null),
+          ...("technician_email" in patch ? { technician_email: patch.technician_email } : null),
+        })
+        .eq("id", invoice.id);
+
+      if (error) {
+        console.error("[Admin NewInvoice] updateMeta error:", error);
+        throw error;
+      }
+    },
+    onSuccess: async () => {
+      if (!invoice?.id) return;
+
+      const { data, error } = await supabaseClient
+        .from("tech_invoices")
+        .select(
+          "id, invoice_number, services_json, windshield_repairs_json, technician_email, vehicle_id, invoice_date, status, customer_email, service_address, subtotal_cents, discount_percent, discount_cents, tax_rate_percent, tax_cents, total_cents, appointment_snapshot"
+        )
+        .eq("id", invoice.id)
+        .single();
+
+      if (!error && data) setInvoice(data as TechInvoice);
+
+      queryClient.invalidateQueries({ queryKey: ["admin:tech_invoices"] });
+    },
+  });
+
+  const handleClientChange = (clientId: string) => {
+    setSelectedClientId(clientId);
+    setSelectedVehicleId("");
+
+    const c = clients?.find((x) => x.id === clientId) ?? null;
+
+    // keep manual override in sync, mirroring tech page input behavior
+    const nextEmail = (c?.email || "").trim();
+    setSelectedCustomerEmail(nextEmail);
+
+    if (invoice?.id) {
+      updateMetaMutation.mutate({
+        customer_email: nextEmail || null,
+        vehicle_id: null,
+        appointment_snapshot: {
+          ...(invoice.appointment_snapshot || {}),
+          client_id: clientId || null,
+        },
+      });
+    }
+  };
+
+  const handleVehicleChange = (vehicleId: string) => {
+    setSelectedVehicleId(vehicleId);
+
+    if (invoice?.id) {
+      updateMetaMutation.mutate({
+        vehicle_id: vehicleId || null,
+      });
+    }
+  };
+
+  const handleBasicMetaSave = () => {
+    if (!invoice?.id) return;
+
+    const resolvedCustomerEmail =
+      (selectedCustomerEmail || selectedClient?.email || "").trim() || null;
+
+    const snapshot = {
+      ...(invoice.appointment_snapshot || {}),
+      notes_customer: localNotes || null,
+      client_id: selectedClientId || null,
+    };
+
+    updateMetaMutation.mutate({
+      customer_email: resolvedCustomerEmail,
+      service_address: localServiceAddress || invoice.service_address || null,
+      invoice_date: localInvoiceDate || invoice.invoice_date || null,
+      appointment_snapshot: snapshot,
+      technician_email: (technicianEmail?.trim() || adminEmail || null) as any,
+    });
+  };
+
+  /* ---------- Totals capture (same as tech) ---------- */
+
+  const handleTotalsChange = React.useCallback((totals: any) => {
+    setTotalsSnapshot((prev) => {
+      const next = {
+        subtotalDollars: totals.subtotalDollars ?? 0,
+        discountDollars: totals.discountDollars ?? 0,
+        taxDollars: totals.taxDollars ?? 0,
+        totalDollars:
+          totals.totalDollars ??
+          ((totals.subtotalDollars ?? 0) - (totals.discountDollars ?? 0) + (totals.taxDollars ?? 0)),
+      };
+
+      if (
+        prev &&
+        prev.subtotalDollars === next.subtotalDollars &&
+        prev.discountDollars === next.discountDollars &&
+        prev.taxDollars === next.taxDollars &&
+        prev.totalDollars === next.totalDollars
+      ) {
+        return prev;
+      }
+      return next;
+    });
+  }, []);
+
+  const effectiveInvoice: TechInvoice | null = React.useMemo(() => {
+    if (!invoice) return null;
+    return {
+      ...invoice,
+      discount_percent: invoice.discount_percent ?? null,
+      discount_cents: invoice.discount_cents ?? 0,
+      tax_rate_percent: invoice.tax_rate_percent ?? null,
+      tax_cents: invoice.tax_cents ?? 0,
+      subtotal_cents: invoice.subtotal_cents ?? 0,
+      total_cents: invoice.total_cents ?? 0,
+    };
+  }, [invoice]);
+
+  const computeMoneyFromSnapshot = React.useCallback(() => {
+    const subtotal_cents =
+      totalsSnapshot != null ? Math.round(totalsSnapshot.subtotalDollars * 100) : effectiveInvoice?.subtotal_cents ?? 0;
+
+    const discount_cents =
+      totalsSnapshot != null ? Math.round(totalsSnapshot.discountDollars * 100) : effectiveInvoice?.discount_cents ?? 0;
+
+    const tax_cents =
+      totalsSnapshot != null ? Math.round(totalsSnapshot.taxDollars * 100) : effectiveInvoice?.tax_cents ?? 0;
+
+    const total_cents =
+      totalsSnapshot != null ? Math.round(totalsSnapshot.totalDollars * 100) : effectiveInvoice?.total_cents ?? 0;
+
+    return { subtotal_cents, discount_cents, tax_cents, total_cents };
+  }, [
+    totalsSnapshot,
+    effectiveInvoice?.subtotal_cents,
+    effectiveInvoice?.discount_cents,
+    effectiveInvoice?.tax_cents,
+    effectiveInvoice?.total_cents,
+  ]);
+
+  /* ---------- Send / Paid (same behavior as tech, but admin screen) ---------- */
+
+  const sendInvoiceMutation = useMutation({
+    mutationFn: async () => {
+      if (!effectiveInvoice?.id) throw new Error("Missing invoice id");
+
+      const todayIso = todayISO();
+      const { subtotal_cents, discount_cents, tax_cents, total_cents } = computeMoneyFromSnapshot();
+
+      const { error } = await supabaseClient
+        .from("tech_invoices")
+        .update({
+          invoice_date: localInvoiceDate || effectiveInvoice.invoice_date || todayIso,
+          status: "sent",
+          subtotal_cents,
+          discount_percent: effectiveInvoice?.discount_percent ?? null,
+          discount_cents,
+          tax_rate_percent: effectiveInvoice?.tax_rate_percent ?? null,
+          tax_cents,
+          total_cents,
+        })
+        .eq("id", effectiveInvoice.id);
+
+      if (error) {
+        console.error("[Admin SendInvoice] error updating tech_invoices:", error);
+        throw error;
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin:tech_invoices"] });
+      if (invoice) setInvoice({ ...invoice, status: "sent" });
+    },
+  });
+
+  const markPaidMutation = useMutation({
+    mutationFn: async () => {
+      if (!effectiveInvoice?.id) throw new Error("Missing invoice id");
+
+      const todayIso = todayISO();
+      const { subtotal_cents, discount_cents, tax_cents, total_cents } = computeMoneyFromSnapshot();
+
+      const { error } = await supabaseClient
+        .from("tech_invoices")
+        .update({
+          invoice_date: localInvoiceDate || effectiveInvoice.invoice_date || todayIso,
+          status: "paid",
+          subtotal_cents,
+          discount_percent: effectiveInvoice?.discount_percent ?? null,
+          discount_cents,
+          tax_rate_percent: effectiveInvoice?.tax_rate_percent ?? null,
+          tax_cents,
+          total_cents,
+        })
+        .eq("id", effectiveInvoice.id);
+
+      if (error) {
+        console.error("[Admin MarkPaid] error updating tech_invoices:", error);
+        throw error;
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin:tech_invoices"] });
+      if (invoice) setInvoice({ ...invoice, status: "paid" });
+    },
+  });
+
+  /* ---------- Loading ---------- */
+
+  if (!authReady) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-950 relative overflow-hidden">
+        <div className="pointer-events-none absolute inset-0 opacity-60">
+          <div className="absolute -top-40 -left-40 w-96 h-96 rounded-full bg-cyan-500/40 blur-3xl" />
+          <div className="absolute -bottom-40 -right-40 w-[28rem] h-[28rem] rounded-full bg-sky-600/40 blur-3xl" />
+        </div>
+        <div className="relative z-10 flex flex-col items-center gap-4 text-slate-100">
+          <Loader2 className="w-10 h-10 animate-spin text-cyan-300" />
+          <p className="text-sm tracking-[0.25em] uppercase text-slate-400">Loading</p>
+        </div>
+      </div>
+    );
+  }
+
+  const status = invoice?.status ?? "draft";
+  const warrantyEnd = addYears(localInvoiceDate || invoice?.invoice_date || todayISO(), 1);
+  const draftExists = !!invoice?.id;
+
+  /* ---------- UI (mirrors Tech New Invoice) ---------- */
 
   return (
-    <div className="min-h-screen p-4 md:p-8 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
-      <div className="max-w-6xl mx-auto">
-        {/* Header */}
-        <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="mb-6 flex justify-between items-center"
-        >
+    <div className="min-h-screen relative bg-slate-950 p-4 md:p-8 print:bg-white print:p-4 overflow-hidden">
+      {/* background orbs */}
+      <div className="pointer-events-none fixed inset-0 -z-10 opacity-80 print:hidden">
+        <div className="absolute -top-40 -left-32 h-80 w-80 rounded-full bg-cyan-500/25 blur-3xl" />
+        <div className="absolute -bottom-40 -right-32 h-[22rem] w-[22rem] rounded-full bg-sky-600/30 blur-3xl" />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_10%_0%,rgba(8,47,73,0.75),transparent_55%),radial-gradient(circle_at_90%_100%,rgba(30,64,175,0.9),transparent_55%)]" />
+      </div>
+
+      <div className="max-w-5xl mx-auto space-y-6 relative z-10">
+        {/* Actions */}
+        <div className="flex items-center justify-between mb-2 print:hidden">
           <Button
             variant="outline"
-            onClick={() =>
-              router.push("/admin/portal/invoices")
-            }
-            className="bg-slate-900 text-slate-100 border-slate-700 shadow-xl hover:bg-slate-800"
+            onClick={() => router.push("/admin/portal/invoices")}
+            className="border-slate-700 bg-slate-900/70 text-slate-50 hover:bg-slate-800"
           >
             <ArrowLeft className="w-4 h-4 mr-2" />
+            Back to Invoices
           </Button>
 
-          <div className="text-center">
-            <motion.h1
-              initial={{ scale: 0.9 }}
-              animate={{ scale: 1 }}
-              className="text-2xl font-bold text-slate-50 mb-1"
+          <div className="flex items-center gap-3">
+            <Badge
+              className={cx(
+                "border text-xs px-3 py-1 tracking-[0.18em] uppercase",
+                !draftExists
+                  ? "bg-slate-800/80 text-slate-200 border-slate-500"
+                  : status === "paid"
+                  ? "bg-emerald-500/10 text-emerald-200 border-emerald-400/60"
+                  : status === "sent"
+                  ? "bg-amber-500/10 text-amber-200 border-amber-300/70"
+                  : "bg-slate-800/80 text-slate-200 border-slate-500"
+              )}
             >
-              New Tech Invoice #
-              {loadingLatestInvoice ? "…" : getNextInvoiceNumber()}
-            </motion.h1>
-            <Badge className="bg-cyan-500/15 text-cyan-100 border-cyan-400/60">
-              Glass Guardian · Admin
+              {draftExists ? status.toUpperCase() : "NOT SAVED"}
             </Badge>
-          </div>
 
-          <Button
-            variant="ghost"
-            size="icon"
-            className="text-slate-200 hover:bg-slate-800"
-          >
-            <MoreVertical className="w-5 h-5" />
-          </Button>
-        </motion.div>
-
-        {/* Total Display */}
-        <motion.div
-          className="text-center mb-8"
-          initial={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: 1, scale: 1 }}
-        >
-          <motion.h2
-            key={total}
-            initial={{ scale: 1.3, filter: "brightness(1.5)" }}
-            animate={{ scale: 1, filter: "brightness(1)" }}
-            transition={{ type: "spring", stiffness: 200 }}
-            className="text-6xl md:text-7xl font-bold text-slate-50 mb-3 drop-shadow-[0_12px_40px_rgba(15,23,42,0.9)]"
-          >
-            ${total.toFixed(2)}
-          </motion.h2>
-          <p className="text-slate-300 text-sm">
-            {invoiceData.discount_percent}% Discount: -
-            {discountAmount.toFixed(2)} · Tax {invoiceData.tax_rate}%: +
-            {taxAmount.toFixed(2)}
-          </p>
-          {signature && (
-            <motion.div
-              initial={{ scale: 0 }}
-              animate={{ scale: 1 }}
-              className="mt-4"
+            <Button
+              onClick={() => window.print()}
+              className="bg-slate-900/80 border border-slate-600 text-slate-50 hover:bg-slate-800"
             >
-              <Badge className="bg-emerald-500 text-white px-6 py-2 text-lg shadow-xl shadow-emerald-500/50">
-                ✓ Paid
-              </Badge>
-            </motion.div>
-          )}
-        </motion.div>
+              <Printer className="w-4 h-4 mr-2" />
+              Print
+            </Button>
 
-        {/* TECH EMAIL (admin override) */}
-        <motion.div
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="mb-6"
-        >
-          <Card className="border border-slate-800 bg-slate-900/80 shadow-2xl">
-            <CardHeader className="border-b border-slate-800 bg-slate-900/90">
-              <CardTitle className="text-slate-50 text-sm flex justify-between items-center">
-                <span>Technician Assignment</span>
-                <span className="text-[0.65rem] uppercase tracking-[0.24em] text-cyan-300/80">
-                  Admin Override
-                </span>
+            {!draftExists && (
+              <Button
+                onClick={() => createDraftMutation.mutate()}
+                disabled={createDraftMutation.isPending || !adminEmail}
+                className="inline-flex items-center gap-2 bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 font-semibold shadow-[0_16px_40px_rgba(45,212,191,0.65)]"
+              >
+                {createDraftMutation.isPending ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Starting…
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle className="w-4 h-4" />
+                    Start Draft
+                  </>
+                )}
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Header */}
+        <Card className="border border-slate-700/80 bg-gradient-to-br from-slate-900/80 via-slate-900/60 to-slate-950/90 backdrop-blur-xl shadow-[0_28px_80px_rgba(15,23,42,0.9)] print:bg-white print:border-slate-200 print:shadow-none">
+          <CardContent className="p-6 md:p-8">
+            <div className="grid md:grid-cols-[1.8fr_1.4fr] gap-8 items-start">
+              {/* Business */}
+              <div className="space-y-4">
+                <div className="flex items-center gap-4">
+                  <motion.div
+                    initial={{ rotateX: 25, rotateY: -25, opacity: 0 }}
+                    animate={{ rotateX: 0, rotateY: 0, opacity: 1 }}
+                    transition={{ duration: 0.65, ease: "easeOut" }}
+                    className="relative h-16 w-16 rounded-2xl bg-gradient-to-br from-cyan-400 to-sky-500 shadow-[0_18px_45px_rgba(56,189,248,0.7)] flex items-center justify-center overflow-hidden"
+                  >
+                    <div className="absolute inset-1 rounded-xl bg-slate-950/70 backdrop-blur-xl border border-cyan-200/70" />
+                    <div className="relative w-10 h-8 border-2 border-cyan-300/80 rounded-t-[1.2rem] rounded-b-lg bg-gradient-to-b from-sky-400/40 to-slate-900/80 shadow-[0_10px_25px_rgba(15,23,42,0.8)]" />
+                  </motion.div>
+                  <div className="space-y-1">
+                    <p className="text-[0.7rem] tracking-[0.25em] uppercase text-cyan-200/80">
+                      Glass Guardian · Admin
+                    </p>
+                    <h1 className="text-2xl md:text-3xl font-extrabold text-slate-50 leading-tight">
+                      New Tech Invoice
+                    </h1>
+                    <p className="text-xs text-slate-400">
+                      Create a tech invoice from Admin · Same layout as Tech New Invoice
+                    </p>
+                  </div>
+                </div>
+
+                {!draftExists && (
+                  <div className="rounded-xl border border-amber-400/40 bg-amber-500/10 p-3 text-xs text-amber-100">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 mt-0.5 text-amber-300" />
+                      <p>
+                        This invoice is currently <span className="font-semibold">not saved</span>. Fill details if you
+                        want, then click <span className="font-semibold">Start Draft</span> to create the row in Supabase.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Technician assignment (admin only) */}
+                <div className="rounded-xl border border-slate-700/70 bg-slate-900/60 p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Wrench className="w-4 h-4 text-cyan-300" />
+                    <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Technician Assignment</p>
+                  </div>
+                  <Input
+                    value={technicianEmail}
+                    onChange={(e) => {
+                      const v = e.target.value.trim();
+                      setTechnicianEmail(v);
+                      if (invoice?.id) updateMetaMutation.mutate({ technician_email: v || null });
+                    }}
+                    placeholder="tech@email.com"
+                    className="h-9 bg-slate-900/70 border-slate-600 text-xs text-slate-100"
+                  />
+                  <p className="text-[11px] text-slate-400 mt-2">
+                    This value writes to <code className="text-slate-300">tech_invoices.technician_email</code>.
+                  </p>
+                </div>
+
+                <div className="mt-3 space-y-1 text-xs text-slate-300 print:text-slate-700">
+                  <p>Web: glassguardianchipandcrackrepair.com</p>
+                  <p>Admin: {adminEmail}</p>
+                </div>
+              </div>
+
+              {/* Invoice specifics */}
+              <div className="md:text-right space-y-4">
+                <div className="inline-flex md:flex md:flex-col items-start md:items-end gap-2">
+                  <p className="text-[0.65rem] font-semibold text-slate-400 tracking-[0.22em] uppercase">Invoice</p>
+                  <p className="text-xl md:text-2xl font-extrabold text-slate-50 md:leading-none">
+                    #{invoice?.invoice_number || (draftExists ? invoice?.id : "—")}
+                  </p>
+                </div>
+
+                <div className="flex md:justify-end flex-wrap gap-3 text-xs md:text-sm text-slate-200 print:text-slate-700">
+                  <span className="inline-flex items-center gap-1.5">
+                    <Calendar className="w-4 h-4 text-sky-300" />
+                    <span>
+                      Service Date:{" "}
+                      <Input
+                        type="date"
+                        value={localInvoiceDate}
+                        onChange={(e) => {
+                          setLocalInvoiceDate(e.target.value);
+                          if (invoice?.id) updateMetaMutation.mutate({ invoice_date: e.target.value || null });
+                        }}
+                        className="ml-1 h-7 w-36 bg-slate-900/60 border-slate-600 text-slate-50 text-xs"
+                      />
+                    </span>
+                  </span>
+
+                  {warrantyEnd && (
+                    <span className="inline-flex items-center gap-1.5">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                      <span>
+                        Warranty Through{" "}
+                        <span className="font-semibold text-emerald-300 print:text-emerald-700">{warrantyEnd}</span>
+                      </span>
+                    </span>
+                  )}
+                </div>
+
+                <Separator className="my-3 border-slate-700/70 md:ml-auto md:w-64 print:border-slate-200" />
+
+                <div className="space-y-1 text-xs md:text-sm text-slate-200 print:text-slate-800">
+                  <p className="text-[0.65rem] tracking-[0.2em] uppercase text-slate-400">Assigned Tech</p>
+                  <p className="font-semibold">{technicianEmail || invoice?.technician_email || "Technician"}</p>
+                  {(clientsErr || vehiclesErr) && (
+                    <p className="mt-2 text-[11px] text-amber-300">
+                      Note: client/vehicle data failed to load. You can still create a manual invoice.
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Selections (mirror tech two-column) */}
+        <div className="grid md:grid-cols-2 gap-6">
+          {/* Bill To */}
+          <Card className="border border-slate-700/70 bg-slate-900/70 backdrop-blur-xl shadow-[0_18px_60px_rgba(15,23,42,0.8)] print:bg-white print:border-slate-200 print:shadow-none">
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2 text-slate-50 print:text-slate-900">
+                <Sparkles className="w-4 h-4 text-cyan-300" />
+                Bill To
               </CardTitle>
             </CardHeader>
-            <CardContent className="p-5 space-y-3">
-              <Label className="text-xs text-slate-300">
-                Technician Email (invoice will be attributed to this tech)
-              </Label>
-              <Input
-                type="email"
-                value={technicianEmail}
-                onChange={(e) => setTechnicianEmail(e.target.value)}
-                className="bg-slate-950 border-slate-700 text-slate-100 placeholder:text-slate-500"
-                placeholder="tech@example.com"
-              />
-              <p className="text-[11px] text-slate-400">
-                Defaulted to your admin email. You can point this invoice to any
-                technician email used in the field.
+            <CardContent className="space-y-3 text-sm text-slate-100 print:text-slate-800">
+              {/* Client select */}
+              <div className="space-y-1">
+                <label className="text-xs uppercase tracking-[0.18em] text-slate-400 flex items-center gap-1">
+                  <UserIcon className="w-3 h-3" />
+                  Client
+                </label>
+                <select
+                  className="w-full h-9 rounded-md bg-slate-900/70 border border-slate-600 text-xs text-slate-100 px-2"
+                  value={selectedClientId}
+                  onChange={(e) => handleClientChange(e.target.value)}
+                >
+                  <option value="">{loadingClients ? "Loading clients…" : "Select client"}</option>
+                  {(clients ?? []).map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {(c.full_name || "Unnamed") + (c.email ? ` · ${c.email}` : "")}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Email override (manual) */}
+              <div className="space-y-1">
+                <label className="text-xs uppercase tracking-[0.18em] text-slate-400 flex items-center gap-1">
+                  <Mail className="w-3 h-3" />
+                  Email (override / manual)
+                </label>
+                <Input
+                  value={selectedCustomerEmail}
+                  onChange={(e) => {
+                    const v = e.target.value.trim();
+                    setSelectedCustomerEmail(v);
+                    if (invoice?.id) updateMetaMutation.mutate({ customer_email: v || null });
+                  }}
+                  placeholder="customer@email.com"
+                  className="h-9 bg-slate-900/70 border-slate-600 text-xs"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs uppercase tracking-[0.18em] text-slate-400 flex items-center gap-1">
+                  <MapPin className="w-3 h-3" />
+                  Service Address
+                </label>
+                <Textarea
+                  value={localServiceAddress}
+                  onChange={(e) => setLocalServiceAddress(e.target.value)}
+                  rows={3}
+                  className="bg-slate-900/70 border-slate-600 text-xs resize-none"
+                  placeholder="Street, city, state, ZIP"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs uppercase tracking-[0.18em] text-slate-400">Customer Notes</label>
+                <Textarea
+                  value={localNotes}
+                  onChange={(e) => setLocalNotes(e.target.value)}
+                  rows={3}
+                  className="bg-slate-900/70 border-slate-600 text-xs resize-none"
+                  placeholder="Optional: what the customer reported, extra instructions, gate codes, etc."
+                />
+              </div>
+
+              <Button
+                size="sm"
+                onClick={handleBasicMetaSave}
+                disabled={!draftExists || updateMetaMutation.isPending}
+                className={cx(
+                  "mt-2 inline-flex items-center gap-2 text-xs font-semibold",
+                  !draftExists
+                    ? "bg-slate-800 text-slate-400 cursor-not-allowed"
+                    : "bg-sky-500/90 hover:bg-sky-400 text-slate-950"
+                )}
+                title={!draftExists ? "Click Start Draft first" : "Save to Supabase"}
+              >
+                {updateMetaMutation.isPending ? (
+                  <>
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle className="w-3 h-3" />
+                    Save Customer &amp; Details
+                  </>
+                )}
+              </Button>
+            </CardContent>
+          </Card>
+
+          {/* Vehicle */}
+          <Card className="border border-slate-700/70 bg-slate-900/70 backdrop-blur-xl shadow-[0_18px_60px_rgba(15,23,42,0.8)] print:bg-white print:border-slate-200 print:shadow-none">
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2 text-slate-50 print:text-slate-900">
+                <Car className="w-4 h-4 text-cyan-300" />
+                Vehicle
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm text-slate-100 print:text-slate-800">
+              <div className="space-y-1">
+                <label className="text-xs uppercase tracking-[0.18em] text-slate-400">Vehicle (filtered by client)</label>
+                <select
+                  className="w-full h-9 rounded-md bg-slate-900/70 border border-slate-600 text-xs text-slate-100 px-2"
+                  value={selectedVehicleId}
+                  onChange={(e) => handleVehicleChange(e.target.value)}
+                  disabled={!selectedClientId}
+                >
+                  {!selectedClientId && <option value="">Select client first</option>}
+                  {selectedClientId && (
+                    <>
+                      <option value="">{loadingVehicles ? "Loading vehicles…" : "Select vehicle"}</option>
+                      {(clientVehicles ?? []).map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.year ?? ""} {v.make ?? ""} {v.model ?? ""} {v.color ? `· ${v.color}` : ""}{" "}
+                          {v.vin ? `· VIN: ${v.vin.slice(0, 8)}…` : ""}
+                          {v.stock_ro ? ` · RO: ${v.stock_ro}` : ""}
+                        </option>
+                      ))}
+                    </>
+                  )}
+                </select>
+              </div>
+
+              {selectedVehicleId && (
+                <p className="text-xs text-slate-300">
+                  This vehicle will be attached to the invoice in <code>tech_invoices.vehicle_id</code>
+                  {!draftExists ? " once you click Start Draft." : "."}
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+
+        {effectiveInvoice ? (
+          <ServicesPerformedAny
+            invoice={{
+              id: effectiveInvoice.id,
+              services_json: effectiveInvoice.services_json ?? null,
+              discount_percent: effectiveInvoice.discount_percent ?? null,
+              discount_cents: effectiveInvoice.discount_cents ?? 0,
+              tax_rate_percent: effectiveInvoice.tax_rate_percent ?? null,
+              tax_cents: effectiveInvoice.tax_cents ?? 0,
+              subtotal_cents: effectiveInvoice.subtotal_cents ?? 0,
+            }}
+            onTotalsChange={handleTotalsChange}
+          />
+        ) : (
+          <Card className="border border-slate-700/80 bg-slate-900/80 backdrop-blur-2xl shadow-[0_18px_60px_rgba(15,23,42,0.85)]">
+            <CardContent className="p-5 text-sm text-slate-200">
+              <p className="text-slate-300">
+                Services Performed will appear after you click <span className="font-semibold">Start Draft</span>.
               </p>
             </CardContent>
           </Card>
-        </motion.div>
-
-        {/* Client Picker (admin) */}
-        {!selectedClient ? (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-          >
-            <Card className="border-none shadow-2xl bg-white">
-              <CardHeader className="bg-gradient-to-r from-blue-50 to-purple-50">
-                <CardTitle className="text-2xl">
-                  Select Client (Global)
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="p-8 space-y-6">
-                <Select onValueChange={handleClientSelect}>
-                  <SelectTrigger className="text-lg h-14">
-                    <SelectValue
-                      placeholder={
-                        loadingClients ? "Loading…" : "Choose a client..."
-                      }
-                    />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {clients.map((client) => (
-                      <SelectItem
-                        key={client.id}
-                        value={client.id}
-                        className="text-lg py-3"
-                      >
-                        <div>
-                          <p className="font-semibold">
-                            {client.full_name}
-                          </p>
-                          <p className="text-xs text-gray-600">
-                            {client.email} · {client.phone}
-                          </p>
-                        </div>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-
-                <div className="relative">
-                  <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-gray-300" />
-                  </div>
-                  <div className="relative flex justify-center text-sm">
-                    <span className="px-4 bg-white text-gray-500">
-                      or
-                    </span>
-                  </div>
-                </div>
-
-                <Button
-                  variant="outline"
-                  className="w-full h-14 text-lg border-2 border-dashed border-blue-400 hover:bg-blue-50"
-                  onClick={() =>
-                    router.push("/admin/portal/clients/new")
-                  }
-                >
-                  <Plus className="w-5 h-5 mr-2" />
-                  Create New Client
-                </Button>
-              </CardContent>
-            </Card>
-          </motion.div>
-        ) : (
-          <>
-            {/* Client Info (admin) */}
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-            >
-              <Card className="mb-6 bg-white border-none shadow-2xl">
-                <CardContent className="p-8">
-                  <div className="flex justify-between items-start mb-6">
-                    <div>
-                      <motion.h3
-                        initial={{ x: -20 }}
-                        animate={{ x: 0 }}
-                        className="text-3xl font-bold text-gray-900 mb-4"
-                      >
-                        {selectedClient.full_name}
-                      </motion.h3>
-                      <div className="space-y-2 text-base">
-                        <p className="flex items-center gap-3 text-gray-700">
-                          <Phone className="w-5 h-5 text-blue-600" />
-                          {selectedClient.phone}
-                        </p>
-                        {selectedClient.email && (
-                          <p className="flex items-center gap-3 text-gray-700">
-                            <Mail className="w-5 h-5 text-blue-600" />
-                            {selectedClient.email}
-                          </p>
-                        )}
-                        {selectedClient.address_line1 && (
-                          <p className="flex items-center gap-3 text-gray-700">
-                            <MapPin className="w-5 h-5 text-blue-600" />
-                            {selectedClient.address_line1},{" "}
-                            {selectedClient.city}, {selectedClient.state}{" "}
-                            {selectedClient.zip}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setSelectedClient(null)}
-                    >
-                      Change Client
-                    </Button>
-                  </div>
-
-                  {selectedClient.notes && (
-                    <motion.div
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="p-4 bg-yellow-50 rounded-xl border-2 border-yellow-200 shadow-inner"
-                    >
-                      <p className="text-sm text-yellow-900 font-medium">
-                        {selectedClient.notes}
-                      </p>
-                    </motion.div>
-                  )}
-
-                  <motion.div
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="mt-6 p-6 bg-white rounded-xl border-2 border-gray-200 shadow-lg text-center"
-                  >
-                    <p className="font-bold text-gray-900 mb-3">
-                      Job is not scheduled
-                    </p>
-                    <Button className="bg-blue-600 hover:bg-blue-700 text-white px-8">
-                      <Calendar className="w-4 h-4 mr-2" />
-                      Link to Appointment
-                    </Button>
-                  </motion.div>
-                </CardContent>
-              </Card>
-            </motion.div>
-
-            {/* Quick Actions */}
-            <div className="grid grid-cols-3 gap-4 mb-6">
-              <Button
-                variant="outline"
-                className="bg-white border-none shadow-xl hover:shadow-2xl py-6 flex-col h-auto gap-2 hover:scale-105 transition-all"
-                onClick={() => {
-                  const el =
-                    document.getElementById("vehicle-picker");
-                  if (el)
-                    el.scrollIntoView({
-                      behavior: "smooth",
-                      block: "start",
-                    });
-                }}
-              >
-                <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl flex items-center justify-center">
-                  <Car className="w-6 h-6 text-white" />
-                </div>
-                <span className="text-blue-600 font-bold text-xs">
-                  ADD VEHICLE
-                </span>
-              </Button>
-
-              <Button
-                variant="outline"
-                className="bg-white border-none shadow-xl hover:shadow-2xl py-6 flex-col h-auto gap-2 hover:scale-105 transition-all"
-              >
-                <div className="w-12 h-12 bg-gradient-to-br from-green-500 to-green-600 rounded-xl flex items-center justify-center">
-                  <FileText className="w-6 h-6 text-white" />
-                </div>
-                <span className="text-green-600 font-bold text-xs">
-                  ADD WORK ORDER
-                </span>
-              </Button>
-
-              <Button
-                variant="outline"
-                className="bg-white border-none shadow-xl hover:shadow-2xl py-6 flex-col h-auto gap-2 hover:scale-105 transition-all"
-              >
-                <div className="w-12 h-12 bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl flex items-center justify-center">
-                  <Clock className="w-6 h-6 text-white" />
-                </div>
-                <span className="text-purple-600 font-bold text-xs">
-                  PAYMENT HISTORY
-                </span>
-              </Button>
-            </div>
-
-            {/* Vehicle Picker */}
-            {!selectedVehicle && clientVehicles.length > 0 && (
-              <Card
-                id="vehicle-picker"
-                className="mb-6 bg-white border-none shadow-2xl"
-              >
-                <CardHeader className="bg-gradient-to-r from-blue-50 to-purple-50">
-                  <CardTitle>Select Vehicle</CardTitle>
-                </CardHeader>
-                <CardContent className="p-6">
-                  <div className="grid gap-4">
-                    {clientVehicles.map((vehicle, idx) => (
-                      <motion.button
-                        key={vehicle.id}
-                        initial={{ opacity: 0, x: -20 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        transition={{ delay: idx * 0.06 }}
-                        onClick={() => setSelectedVehicle(vehicle)}
-                        className="text-left p-6 bg-gradient-to-r from-white to-gray-50 rounded-xl border-2 border-gray-200 hover:border-blue-500 hover:shadow-xl transition-all group"
-                      >
-                        <div className="flex items-center gap-4">
-                          <div
-                            className="w-16 h-16 rounded-xl flex items-center justify-center shadow-lg"
-                            style={{
-                              background: `linear-gradient(135deg, ${
-                                vehicle.color || "#6B7280"
-                              }, ${vehicle.color || "#4B5563"})`,
-                            }}
-                          >
-                            <Car className="w-8 h-8 text-white" />
-                          </div>
-                          <div className="flex-1">
-                            <p className="text-xl font-bold text-gray-900 group-hover:text-blue-600 transition-colors">
-                              {vehicle.year} {vehicle.make}{" "}
-                              {vehicle.model}
-                            </p>
-                            <p className="text-sm text-gray-600">
-                              VIN: {vehicle.vin || "N/A"}
-                            </p>
-                            {vehicle.stock_ro && (
-                              <p className="text-sm text-gray-600">
-                                Stock/RO: {vehicle.stock_ro}
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                      </motion.button>
-                    ))}
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-
-            {/* Vehicle Display */}
-            {selectedVehicle && (
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-              >
-                <Card className="mb-6 bg-white border-none shadow-2xl overflow-hidden">
-                  <div className="bg-gradient-to-br from-slate-900 to-blue-900 p-6">
-                    <div className="grid md:grid-cols-2 gap-8">
-                      <div>
-                        <div className="bg-white/10 backdrop-blur-md rounded-2xl p-6 border border-white/20 shadow-2xl overflow-hidden">
-                          <VehicleImageDisplay
-                            make={selectedVehicle.make || ""}
-                            model={selectedVehicle.model || ""}
-                            year={selectedVehicle.year || undefined}
-                            color={
-                              selectedVehicle.color || "#E5E7EB"
-                            }
-                            className="h-64"
-                          />
-                        </div>
-                        <motion.div
-                          initial={{ opacity: 0 }}
-                          animate={{ opacity: 1 }}
-                          className="text-center mt-6"
-                        >
-                          <h3 className="text-3xl font-bold text-white mb-2">
-                            {selectedVehicle.year}{" "}
-                            {selectedVehicle.make?.toUpperCase()}
-                          </h3>
-                          <h4 className="text-xl text-blue-200 font-semibold mb-3">
-                            {selectedVehicle.model?.toUpperCase()}
-                            {selectedVehicle.color
-                              ? `, ${selectedVehicle.color.toUpperCase()}`
-                              : ""}
-                          </h4>
-                        </motion.div>
-                      </div>
-
-                      <div className="space-y-3">
-                        {[
-                          {
-                            label: "VIN Number",
-                            value: selectedVehicle.vin,
-                          },
-                          {
-                            label: "Stock/RO #",
-                            value: selectedVehicle.stock_ro,
-                          },
-                          {
-                            label: "Year",
-                            value: selectedVehicle.year,
-                          },
-                          {
-                            label: "Make",
-                            value: selectedVehicle.make,
-                          },
-                          {
-                            label: "Model",
-                            value: selectedVehicle.model,
-                          },
-                          {
-                            label: "Exterior Color",
-                            value: selectedVehicle.color,
-                          },
-                          {
-                            label: "Vehicle Type",
-                            value: selectedVehicle.vehicle_type,
-                          },
-                          {
-                            label: "Trim",
-                            value: selectedVehicle.trim,
-                          },
-                        ]
-                          .filter((item) => item.value)
-                          .map((item, idx) => (
-                            <motion.div
-                              key={`${item.label}-${idx}`}
-                              initial={{ opacity: 0, x: 20 }}
-                              animate={{ opacity: 1, x: 0 }}
-                              transition={{ delay: idx * 0.05 }}
-                              className="flex justify-between items-center p-4 bg-white/10 backdrop-blur-sm rounded-xl border border-white/20"
-                            >
-                              <span className="text-gray-300 font-medium">
-                                {item.label}
-                              </span>
-                              <span className="font-bold text-white text-right">
-                                {String(item.value)}
-                              </span>
-                            </motion.div>
-                          ))}
-                      </div>
-                    </div>
-                  </div>
-                </Card>
-              </motion.div>
-            )}
-
-            {/* SERVICES */}
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-            >
-              <Card className="mb-6 bg-white border-none shadow-2xl">
-                <CardHeader className="bg-gradient-to-r from-blue-50 to-purple-50">
-                  <CardTitle className="text-2xl">
-                    SERVICES
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="p-8">
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-                    {SERVICE_CATEGORIES.map((category, idx) => (
-                      <motion.div
-                        key={category.id}
-                        initial={{ opacity: 0, scale: 0.8 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        transition={{ delay: idx * 0.1 }}
-                        whileHover={{ scale: 1.05, y: -5 }}
-                        className="text-center"
-                      >
-                        <div
-                          className={`w-24 h-24 mx-auto mb-4 bg-gradient-to-br ${category.color} rounded-2xl flex items-center justify-center text-4xl shadow-xl hover:shadow-2xl transition-all`}
-                        >
-                          {category.icon}
-                        </div>
-                        <p className="font-bold text-sm mb-3 text-gray-900">
-                          {category.label}
-                        </p>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 font-semibold">
-                            $
-                          </span>
-                          <Input
-                            type="number"
-                            step="0.01"
-                            value={
-                              (invoiceData as AnyObj)[
-                                `${category.id}_total`
-                              ] || 0
-                            }
-                            onChange={(e) =>
-                              setInvoiceData((cur) => ({
-                                ...cur,
-                                [`${category.id}_total`]:
-                                  parseFloat(e.target.value) || 0,
-                              }))
-                            }
-                            placeholder="0.00"
-                            className="text-center text-lg font-semibold pl-7 h-12 border-2"
-                          />
-                        </div>
-                      </motion.div>
-                    ))}
-                  </div>
-
-                  <motion.div
-                    whileHover={{ scale: 1.02 }}
-                    className="mt-8 p-6 bg-gradient-to-r from-green-50 via-green-100 to-green-50 rounded-2xl border-2 border-green-300 shadow-xl"
-                  >
-                    <div className="flex justify-between items-center">
-                      <span className="text-xl font-bold text-gray-900">
-                        Grand Total
-                      </span>
-                      <motion.span
-                        key={subtotal}
-                        initial={{
-                          scale: 1.2,
-                          color: "#10b981",
-                        }}
-                        animate={{ scale: 1, color: "#059669" }}
-                        className="text-4xl font-bold"
-                      >
-                        ${subtotal.toFixed(2)}
-                      </motion.span>
-                    </div>
-                  </motion.div>
-                </CardContent>
-              </Card>
-            </motion.div>
-
-            {/* GLASS WORK ORDER */}
-            <Card className="mb-6 bg-gradient-to-br from-slate-800 to-slate-900 border-none shadow-2xl text-white">
-              <CardHeader className="border-b border-white/10">
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-2xl">
-                    GLASS
-                  </CardTitle>
-                  <Tabs
-                    value={activeGlassView}
-                    onValueChange={(v) =>
-                      setActiveGlassView(v as any)
-                    }
-                  >
-                    <TabsList className="bg-white/10 border border-white/20">
-                      <TabsTrigger
-                        value="visual"
-                        className="data-[state=active]:bg-white data-[state=active]:text-gray-900"
-                      >
-                        VISUAL
-                      </TabsTrigger>
-                      <TabsTrigger
-                        value="list"
-                        className="data-[state=active]:bg-white data-[state=active]:text-gray-900"
-                      >
-                        LIST
-                      </TabsTrigger>
-                    </TabsList>
-                  </Tabs>
-                </div>
-              </CardHeader>
-
-              <CardContent className="p-8">
-                <div className="text-center mb-8">
-                  <motion.div
-                    className="inline-block p-6 bg-white/10 backdrop-blur-md rounded-2xl border border-white/20 shadow-xl"
-                    whileHover={{ scale: 1.05 }}
-                  >
-                    <p className="text-5xl font-bold">
-                      $
-                      {Number(
-                        invoiceData.glass_total || 0
-                      ).toFixed(2)}
-                    </p>
-                  </motion.div>
-                </div>
-
-                {/* Mode */}
-                <div className="flex justify-center mb-8">
-                  <div className="inline-flex rounded-full bg-white/10 backdrop-blur-md p-1.5 border border-white/20 shadow-xl">
-                    {(["flat", "panel", "repair"] as const).map(
-                      (mode) => (
-                        <motion.button
-                          key={mode}
-                          onClick={() => setGlassMode(mode)}
-                          whileHover={{ scale: 1.05 }}
-                          whileTap={{ scale: 0.95 }}
-                          className={`px-8 py-3 rounded-full text-sm font-bold transition-all ${
-                            glassMode === mode
-                              ? "bg-blue-500 text-white shadow-lg shadow-blue-500/50"
-                              : "text-white/70 hover:text-white"
-                          }`}
-                        >
-                          {mode.charAt(0).toUpperCase() +
-                            mode.slice(1)}
-                        </motion.button>
-                      )
-                    )}
-                  </div>
-                </div>
-
-                {/* Visual Repair */}
-                {activeGlassView === "visual" &&
-                  glassMode === "repair" && (
-                    <AnimatePresence mode="wait">
-                      <motion.div
-                        key="visual-repair"
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                      >
-                        <Card className="bg-white text-gray-900 border-none shadow-2xl">
-                          <CardContent className="p-6">
-                            <Tabs
-                              value={activeRepairTab}
-                              onValueChange={(v) =>
-                                setActiveRepairTab(v as any)
-                              }
-                            >
-                              <TabsList className="grid w-full grid-cols-4 mb-8 h-14 bg-gray-100">
-                                {(
-                                  [
-                                    "quadrant",
-                                    "type",
-                                    "resin",
-                                    "notes",
-                                  ] as const
-                                ).map((tab) => (
-                                  <TabsTrigger
-                                    key={tab}
-                                    value={tab}
-                                    className="text-sm font-bold data-[state=active]:bg-white data-[state=active]:shadow-lg"
-                                  >
-                                    {tab.toUpperCase()}
-                                  </TabsTrigger>
-                                ))}
-                              </TabsList>
-
-                              <TabsContent
-                                value="quadrant"
-                                className="mt-8"
-                              >
-                                <CarTopView
-                                  color={
-                                    selectedVehicle?.color ||
-                                    "#E5E7EB"
-                                  }
-                                  selectedQuadrant={
-                                    currentRepair.quadrant
-                                  }
-                                  onSelectQuadrantAction={(
-                                    quadrant: string
-                                  ) =>
-                                    setCurrentRepair((cr) => ({
-                                      ...cr,
-                                      quadrant,
-                                    }))
-                                  }
-                                />
-                              </TabsContent>
-
-                              <TabsContent
-                                value="type"
-                                className="mt-8"
-                              >
-                                <DamageTypeSelector
-                                  selectedType={
-                                    currentRepair.damage_type
-                                  }
-                                  onSelectTypeAction={(
-                                    type: string
-                                  ) =>
-                                    setCurrentRepair((cr) => ({
-                                      ...cr,
-                                      damage_type: type,
-                                    }))
-                                  }
-                                />
-                              </TabsContent>
-
-                              <TabsContent
-                                value="resin"
-                                className="mt-8"
-                              >
-                                <div className="text-center py-12">
-                                  <p className="text-gray-500 mb-4">
-                                    Resin Selection
-                                  </p>
-                                  <div className="max-w-md mx-auto p-8 border-2 border-dashed border-gray-300 rounded-2xl">
-                                    <p className="text-gray-400">
-                                      Resin catalog coming
-                                      soon
-                                    </p>
-                                  </div>
-                                </div>
-                              </TabsContent>
-
-                              <TabsContent
-                                value="notes"
-                                className="mt-8"
-                              >
-                                <div className="max-w-2xl mx-auto space-y-4">
-                                  <motion.div
-                                    whileHover={{ scale: 1.02 }}
-                                    className="flex items-center justify-between p-5 bg-gray-50 rounded-xl border-2 border-gray-200 hover:border-blue-400 transition-all"
-                                  >
-                                    <span className="font-bold text-gray-900">
-                                      FIX POOR PREVIOUS REPAIR
-                                    </span>
-                                    <Switch
-                                      checked={
-                                        currentRepair.is_previous_repair
-                                      }
-                                      onCheckedChange={(checked) =>
-                                        setCurrentRepair(
-                                          (cr) => ({
-                                            ...cr,
-                                            is_previous_repair:
-                                              checked,
-                                          })
-                                        )
-                                      }
-                                      className="data-[state=checked]:bg-blue-600"
-                                    />
-                                  </motion.div>
-
-                                  <motion.div
-                                    whileHover={{ scale: 1.02 }}
-                                    className="flex items-center justify-between p-5 bg-gray-50 rounded-xl border-2 border-gray-200 hover:border-blue-400 transition-all"
-                                  >
-                                    <span className="font-bold text-gray-900">
-                                      IMPROVE SEVERE CRACK
-                                    </span>
-                                    <Switch
-                                      checked={
-                                        currentRepair.improve_severe
-                                      }
-                                      onCheckedChange={(checked) =>
-                                        setCurrentRepair(
-                                          (cr) => ({
-                                            ...cr,
-                                            improve_severe:
-                                              checked,
-                                          })
-                                        )
-                                      }
-                                      className="data-[state=checked]:bg-blue-600"
-                                    />
-                                  </motion.div>
-
-                                  <div className="p-6 bg-gradient-to-r from-blue-50 to-purple-50 rounded-xl border-2 border-blue-200 shadow-inner">
-                                    <div className="flex items-center justify-between mb-4">
-                                      <span className="font-bold text-gray-900 text-lg">
-                                        INCH CRACK
-                                      </span>
-                                      <div className="flex items-center gap-4">
-                                        <motion.button
-                                          whileHover={{
-                                            scale: 1.1,
-                                          }}
-                                          whileTap={{
-                                            scale: 0.9,
-                                          }}
-                                        >
-                                          <Button
-                                            size="icon"
-                                            variant="outline"
-                                            className="h-12 w-12 rounded-full bg-white shadow-lg"
-                                            onClick={() =>
-                                              setCurrentRepair(
-                                                (cr) => ({
-                                                  ...cr,
-                                                  crack_length_inches:
-                                                    Math.max(
-                                                      0,
-                                                      cr.crack_length_inches -
-                                                        1
-                                                    ),
-                                                })
-                                              )
-                                            }
-                                          >
-                                            <Minus className="w-5 h-5" />
-                                          </Button>
-                                        </motion.button>
-                                        <motion.span
-                                          key={
-                                            currentRepair.crack_length_inches
-                                          }
-                                          initial={{
-                                            scale: 1.3,
-                                          }}
-                                          animate={{
-                                            scale: 1,
-                                          }}
-                                          className="text-3xl font-bold w-16 text-center text-gray-900"
-                                        >
-                                          {
-                                            currentRepair.crack_length_inches
-                                          }
-                                        </motion.span>
-                                        <motion.button
-                                          whileHover={{
-                                            scale: 1.1,
-                                          }}
-                                          whileTap={{
-                                            scale: 0.9,
-                                          }}
-                                        >
-                                          <Button
-                                            size="icon"
-                                            variant="outline"
-                                            className="h-12 w-12 rounded-full bg-white shadow-lg"
-                                            onClick={() =>
-                                              setCurrentRepair(
-                                                (cr) => ({
-                                                  ...cr,
-                                                  crack_length_inches:
-                                                    cr.crack_length_inches +
-                                                    1,
-                                                })
-                                              )
-                                            }
-                                          >
-                                            <Plus className="w-5 h-5" />
-                                          </Button>
-                                        </motion.button>
-                                      </div>
-                                    </div>
-                                  </div>
-
-                                  <div className="p-6 bg-gray-50 rounded-xl border-2 border-gray-200 shadow-inner">
-                                    <Label className="font-bold mb-3 block text-gray-900 text-lg">
-                                      CUSTOM NOTE
-                                    </Label>
-                                    <Textarea
-                                      value={currentRepair.notes}
-                                      onChange={(e) =>
-                                        setCurrentRepair(
-                                          (cr) => ({
-                                            ...cr,
-                                            notes: e.target.value,
-                                          })
-                                        )
-                                      }
-                                      placeholder="Enter Note..."
-                                      rows={5}
-                                      className="bg-white border-2 text-base"
-                                    />
-                                  </div>
-
-                                  <motion.div
-                                    whileHover={{ scale: 1.02 }}
-                                    whileTap={{ scale: 0.98 }}
-                                  >
-                                    <Button
-                                      onClick={
-                                        handleAddRepairToLocation
-                                      }
-                                      className="w-full bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white py-6 text-lg font-bold shadow-xl"
-                                      disabled={
-                                        !currentRepair.quadrant ||
-                                        !currentRepair.damage_type
-                                      }
-                                    >
-                                      <Plus className="w-5 h-5 mr-2" />
-                                      Add Repair to{" "}
-                                      {currentGlassLocation
-                                        .toUpperCase()
-                                        .replace(/_/g, " ")}
-                                    </Button>
-                                  </motion.div>
-                                </div>
-                              </TabsContent>
-                            </Tabs>
-                          </CardContent>
-                        </Card>
-                      </motion.div>
-                    </AnimatePresence>
-                  )}
-
-                {/* List View */}
-                {activeGlassView === "list" && (
-                  <div className="space-y-4">
-                    {GLASS_LOCATIONS.map((location) => (
-                      <motion.div
-                        key={location.id}
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="bg-white/5 backdrop-blur-sm rounded-xl p-6 border border-white/10"
-                      >
-                        <div className="flex justify-between items-center mb-3">
-                          <h4 className="font-bold text-lg">
-                            {location.label}
-                          </h4>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="bg-white/10 border-white/20 text-white hover:bg-white/20"
-                            onClick={() => {
-                              setCurrentGlassLocation(location.id);
-                              setActiveGlassView("visual");
-                            }}
-                          >
-                            <Plus className="w-4 h-4 mr-1" />
-                            Add Repair
-                          </Button>
-                        </div>
-
-                        {glassRepairs[location.id] &&
-                        glassRepairs[location.id].length > 0 ? (
-                          <div className="space-y-2">
-                            {glassRepairs[location.id].map(
-                              (repair, idx) => (
-                                <div
-                                  key={`${location.id}-${idx}`}
-                                  className="p-4 bg-white/10 rounded-lg border border-white/10 text-sm"
-                                >
-                                  <p className="font-semibold">
-                                    {repair.quadrant
-                                      ?.toUpperCase()}{" "}
-                                    -{" "}
-                                    {repair.damage_type
-                                      ?.toUpperCase()}
-                                  </p>
-                                  {repair.crack_length_inches >
-                                    0 && (
-                                    <p className="text-slate-200">
-                                      {
-                                        repair.crack_length_inches
-                                      }
-                                      " crack
-                                    </p>
-                                  )}
-                                  {repair.notes && (
-                                    <p className="text-slate-200 mt-1">
-                                      Note: {repair.notes}
-                                    </p>
-                                  )}
-                                </div>
-                              )
-                            )}
-                          </div>
-                        ) : (
-                          <p className="text-slate-400 text-sm">
-                            No repairs added
-                          </p>
-                        )}
-                      </motion.div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* PAYMENT CTA */}
-            {!showPayment && (
-              <motion.div
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-              >
-                <Button
-                  onClick={() => setShowPayment(true)}
-                  className="w-full bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 py-8 text-xl font-bold shadow-2xl shadow-blue-500/30"
-                  disabled={total === 0}
-                >
-                  Proceed to Payment
-                </Button>
-              </motion.div>
-            )}
-
-            {showPayment && (
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-              >
-                {/* Payment Method */}
-                <Card className="mb-6 bg-white border-none shadow-2xl">
-                  <CardHeader className="bg-gradient-to-r from-gray-50 to-gray-100">
-                    <CardTitle className="text-2xl">
-                      PAYMENT METHOD
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="p-8 space-y-8">
-                    <motion.div
-                      initial={{ scale: 0.95 }}
-                      animate={{ scale: 1 }}
-                      className="text-center mb-6"
-                    >
-                      <p className="text-6xl font-bold text-gray-900 mb-2">
-                        ${total.toFixed(2)}
-                      </p>
-                      <p className="text-gray-500">Balance Due</p>
-                      <p className="text-sm text-gray-600 mt-2">
-                        Invoice #
-                        {loadingLatestInvoice
-                          ? "…"
-                          : getNextInvoiceNumber()}{" "}
-                        - {new Date().toLocaleDateString()}
-                      </p>
-                      <div className="mt-4 inline-block px-6 py-2 bg-gray-100 rounded-full">
-                        <span className="text-sm font-medium text-gray-600">
-                          Total Paid: $0.00
-                        </span>
-                      </div>
-                    </motion.div>
-
-                    {/* Toggle */}
-                    <div className="grid grid-cols-2 gap-4">
-                      <motion.button
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
-                        onClick={() =>
-                          setPaymentMode("credit_card")
-                        }
-                        className={`p-6 rounded-xl border-3 transition-all ${
-                          paymentMode === "credit_card"
-                            ? "border-blue-500 bg-blue-50 shadow-xl"
-                            : "border-gray-200 bg-white"
-                        }`}
-                      >
-                        <div
-                          className={`w-3 h-3 rounded-full mx-auto mb-3 ${
-                            paymentMode === "credit_card"
-                              ? "bg-blue-500"
-                              : "bg-gray-300"
-                          }`}
-                        />
-                        <p className="font-bold text-gray-900">
-                          Credit Card
-                        </p>
-                      </motion.button>
-
-                      <motion.button
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
-                        onClick={() => setPaymentMode("offline")}
-                        className={`p-6 rounded-xl border-3 transition-all ${
-                          paymentMode === "offline"
-                            ? "border-blue-500 bg-blue-50 shadow-xl"
-                            : "border-gray-200 bg-white"
-                        }`}
-                      >
-                        <div
-                          className={`w-3 h-3 rounded-full mx-auto mb-3 ${
-                            paymentMode === "offline"
-                              ? "bg-blue-500"
-                              : "bg-gray-300"
-                          }`}
-                        />
-                        <p className="font-bold text-gray-900">
-                          Offline Payment
-                        </p>
-                      </motion.button>
-                    </div>
-
-                    {/* Amount Breakdown */}
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="p-6 border-3 border-blue-500 bg-blue-50 rounded-xl text-center shadow-lg">
-                        <p className="text-sm text-gray-600 mb-2">
-                          Amount to pay
-                        </p>
-                        <p className="text-3xl font-bold text-gray-900">
-                          ${total.toFixed(2)}
-                        </p>
-                      </div>
-                      <div className="p-6 border-2 border-gray-300 rounded-xl text-center">
-                        <p className="text-sm text-gray-600 mb-2">
-                          Remaining Balance
-                        </p>
-                        <p className="text-3xl font-bold text-gray-900">
-                          Total: $0.00
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Offline Payment Options */}
-                    {paymentMode === "offline" && (
-                      <motion.div
-                        initial={{ opacity: 0, height: 0 }}
-                        animate={{ opacity: 1, height: "auto" }}
-                        className="space-y-4"
-                      >
-                        <Label className="text-lg font-bold">
-                          Payment method
-                        </Label>
-                        <Select
-                          value={invoiceData.payment_method}
-                          onValueChange={(value) =>
-                            setInvoiceData((cur) => ({
-                              ...cur,
-                              payment_method: value,
-                            }))
-                          }
-                        >
-                          <SelectTrigger className="h-14 text-lg border-2">
-                            <SelectValue placeholder="Select a method" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {PAYMENT_METHODS.map((method) => (
-                              <SelectItem
-                                key={method.value}
-                                value={method.value}
-                                className="text-lg py-3"
-                              >
-                                {method.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-
-                        <div>
-                          <Label className="text-lg font-bold mb-3 block">
-                            Enter payment note
-                          </Label>
-                          <Textarea
-                            value={invoiceData.payment_note}
-                            onChange={(e) =>
-                              setInvoiceData((cur) => ({
-                                ...cur,
-                                payment_note: e.target.value,
-                              }))
-                            }
-                            placeholder="Enter payment note"
-                            rows={4}
-                            className="text-base border-2"
-                          />
-                        </div>
-                      </motion.div>
-                    )}
-
-                    <motion.div
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                    >
-                      <Button
-                        onClick={() => setShowPayment(false)}
-                        className="w-full bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 py-7 text-xl font-bold shadow-2xl shadow-blue-500/30"
-                        disabled={
-                          paymentMode === "offline" &&
-                          !invoiceData.payment_method
-                        }
-                      >
-                        MARK AS PAID / CONTINUE
-                      </Button>
-                    </motion.div>
-                  </CardContent>
-                </Card>
-
-                {/* SIGNATURE */}
-                <Card className="mb-6 bg-white border-none shadow-2xl">
-                  <CardHeader className="bg-gradient-to-r from-gray-50 to-gray-100">
-                    <CardTitle className="text-2xl">
-                      SIGNATURE
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="p-8">
-                    <motion.div
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="text-center mb-8"
-                    >
-                      <p className="text-5xl font-bold text-gray-900 mb-2">
-                        ${total.toFixed(2)}
-                      </p>
-                      <p className="text-gray-500">
-                        Invoice Total
-                      </p>
-                    </motion.div>
-
-                    <SignatureCanvas
-                      onSaveAction={(signatureData: string) =>
-                        setSignature(signatureData)
-                      }
-                      disclaimer={DISCLAIMER}
-                    />
-
-                    {signature && (
-                      <motion.div
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="mt-8"
-                      >
-                        <motion.div
-                          whileHover={{ scale: 1.02 }}
-                          whileTap={{ scale: 0.98 }}
-                        >
-                          <Button
-                            onClick={() =>
-                              createInvoiceMutation.mutate()
-                            }
-                            disabled={
-                              createInvoiceMutation.isPending
-                            }
-                            className="w-full bg-gradient-to-r from-emerald-600 to-emerald-700 hover:from-emerald-700 hover:to-emerald-800 py-8 text-xl font-bold shadow-2xl shadow-emerald-500/30"
-                          >
-                            {createInvoiceMutation.isPending ? (
-                              <div className="flex items-center gap-3">
-                                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-white" />
-                                Saving Invoice...
-                              </div>
-                            ) : (
-                              "COMPLETE & SAVE INVOICE"
-                            )}
-                          </Button>
-                        </motion.div>
-                      </motion.div>
-                    )}
-                  </CardContent>
-                </Card>
-              </motion.div>
-            )}
-          </>
         )}
+
+        {/* Windshield Repair Map */}
+        {effectiveInvoice ? (
+          <WindshieldRepairMap invoice={effectiveInvoice as any} />
+        ) : (
+          <Card className="border border-slate-700/80 bg-slate-900/80 backdrop-blur-2xl shadow-[0_18px_60px_rgba(15,23,42,0.85)]">
+            <CardContent className="p-5 text-sm text-slate-200">
+              <p className="text-slate-300">
+                Windshield Repair Map will appear after you click <span className="font-semibold">Start Draft</span>.
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Repair Details */}
+        <Card className="border border-slate-700/80 bg-slate-900/80 backdrop-blur-2xl shadow-[0_26px_80px_rgba(15,23,42,0.9)] print:bg-white print:border-slate-200 print:shadow-none">
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-slate-50 print:text-slate-900">
+              <FileText className="w-4 h-4 text-sky-300" />
+              Repair Details
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2 text-sm text-slate-100 print:text-slate-800">
+            <p className="text-xs text-slate-300">
+              This section is your free-text summary on the printed invoice.
+              {!draftExists ? " (Will save after Start Draft.)" : ""}
+            </p>
+            <Textarea
+              rows={4}
+              className="bg-slate-900/70 border-slate-700 text-xs resize-none mt-2"
+              placeholder="Example: Repaired 2 rock chips on driver side area of windshield..."
+              onChange={(e) => {
+                if (!invoice?.id) return;
+                const snapshot = { ...(invoice.appointment_snapshot || {}), damage_description: e.target.value || null };
+                updateMetaMutation.mutate({ appointment_snapshot: snapshot });
+              }}
+              defaultValue={invoice?.appointment_snapshot?.damage_description ?? ""}
+              disabled={!draftExists}
+            />
+          </CardContent>
+        </Card>
+
+        {/* Send / Paid */}
+        {effectiveInvoice && (
+          <Card className="border border-slate-700/80 bg-slate-900/80 backdrop-blur-2xl shadow-[0_20px_60px_rgba(15,23,42,0.85)] print:hidden">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-slate-50">
+                <Send className="w-4 h-4 text-emerald-300" />
+                Send Invoice (Standalone)
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-sm text-slate-200">
+              <p className="text-xs md:text-sm text-slate-300 max-w-xl">
+                When you&apos;re done entering services and mapping the repair, you can either{" "}
+                <span className="font-semibold text-emerald-300">Send Invoice</span> or{" "}
+                <span className="font-semibold text-emerald-300">Mark Paid &amp; Send</span>.
+              </p>
+              <div className="flex flex-col items-stretch gap-1">
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <Button
+                    disabled={sendInvoiceMutation.isPending || markPaidMutation.isPending}
+                    onClick={() => sendInvoiceMutation.mutate()}
+                    className="inline-flex items-center gap-2 bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 font-semibold shadow-[0_16px_40px_rgba(45,212,191,0.65)]"
+                  >
+                    {sendInvoiceMutation.isPending ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Sending…
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-4 h-4" />
+                        Send Invoice
+                      </>
+                    )}
+                  </Button>
+
+                  <Button
+                    disabled={sendInvoiceMutation.isPending || markPaidMutation.isPending}
+                    onClick={() => markPaidMutation.mutate()}
+                    className="inline-flex items-center gap-2 bg-gradient-to-r from-emerald-600 to-sky-600 hover:from-emerald-500 hover:to-sky-500 text-slate-50 font-semibold shadow-[0_16px_40px_rgba(45,212,191,0.75)]"
+                  >
+                    {markPaidMutation.isPending ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Marking…
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle className="w-4 h-4" />
+                        Mark Paid &amp; Send
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Warranty */}
+        <Card className="border border-emerald-500/50 bg-gradient-to-br from-emerald-500/15 via-slate-900/80 to-emerald-700/30 backdrop-blur-2xl shadow-[0_24px_80px_rgba(16,185,129,0.7)] print:bg-white print:border-emerald-300 print:shadow-none">
+          <CardHeader className="flex flex-row items-center justify-between gap-3 pb-3">
+            <CardTitle className="flex items-center gap-2 text-slate-50 print:text-slate-900">
+              <ShieldCheck className="w-5 h-5 text-emerald-300" />
+              Windshield Repair Warranty
+            </CardTitle>
+            {localInvoiceDate && warrantyEnd && (
+              <Badge className="bg-emerald-500/20 text-emerald-100 border-emerald-300/70 text-[11px] print:bg-emerald-100 print:text-emerald-800">
+                {localInvoiceDate} → {warrantyEnd}
+              </Badge>
+            )}
+          </CardHeader>
+          <CardContent className="space-y-2 text-xs md:text-sm text-emerald-50 print:text-emerald-900">
+            <p>This invoice serves as the official Glass Guardian warranty record for the windshield repair performed.</p>
+            <ul className="list-disc ml-5 space-y-1">
+              <li>
+                <span className="font-semibold">Coverage:</span> 1 year from the service date for the repaired damage only.
+              </li>
+              <li>Warranty does not cover new damage or unrelated issues.</li>
+            </ul>
+          </CardContent>
+        </Card>
+
+        <div className="hidden print:block text-center text-[10px] text-slate-500 mt-4">
+          Glass Guardian Chip &amp; Crack Repair — {new Date().toLocaleDateString()}
+        </div>
       </div>
     </div>
   );
 }
+

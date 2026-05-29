@@ -1,4 +1,4 @@
-//app/user/(protected)/dashboard/appointments/[id]/waiver/page.tsx
+// app/user/(protected)/dashboard/appointments/[id]/waiver/page.tsx
 "use client";
 
 import * as React from "react";
@@ -19,6 +19,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import SignatureCanvas from "@/components/forms/SignatureCanvas";
+import { IdWaiver } from "@/components/user/appointment/idwaiver";
 import { buildGlassGuardianWaiverText } from "@/lib/waivers/glassGuardianWaiver";
 
 function isoDateInTZ(d: Date, timeZone: string) {
@@ -31,6 +32,30 @@ function isoDateInTZ(d: Date, timeZone: string) {
 
   const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function dateLabelInTZ(d: Date, timeZone: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+  }).format(d);
+}
+
+function smartCapsName(value: string) {
+  return value.toUpperCase();
+}
+
+function autoInitialsFromName(name: string) {
+  return name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part[0])
+    .join("")
+    .slice(0, 5)
+    .toUpperCase();
 }
 
 function useAppointment(id: string) {
@@ -107,7 +132,21 @@ export default function AppointmentWaiverPage() {
   const [ok, setOk] = React.useState(false);
 
   const tz = "America/Los_Angeles";
-  const waiverText = React.useMemo(() => buildGlassGuardianWaiverText(60), []);
+  const repairAmount = 70;
+
+  const signedDateLabel = React.useMemo(() => dateLabelInTZ(new Date(), tz), [tz]);
+
+  const waiverText = React.useMemo(
+    () =>
+      buildGlassGuardianWaiverText({
+        repairAmount,
+        customerName: fullName,
+        initials,
+        signatureName: signatureDataUrl ? fullName : "",
+        signedDateLabel,
+      }),
+    [fullName, initials, repairAmount, signatureDataUrl, signedDateLabel]
+  );
 
   const dayGate = React.useMemo(() => {
     const today = isoDateInTZ(new Date(), tz);
@@ -169,6 +208,8 @@ export default function AppointmentWaiverPage() {
           initials: initials.trim(),
           signature_type,
           signature_payload,
+          signature_name: fullName.trim(),
+          waiver_text: waiverText,
         }),
       });
 
@@ -263,21 +304,24 @@ export default function AppointmentWaiverPage() {
                   </div>
                 )}
 
-                <div className="rounded-xl border border-white/10 bg-slate-950/40 p-4">
-                  <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">
-                    Waiver Preview
-                  </div>
-                  <pre className="whitespace-pre-wrap text-sm leading-relaxed text-slate-100">
-                    {waiverText}
-                  </pre>
-                </div>
+                <IdWaiver
+                  fullName={fullName}
+                  initials={initials}
+                  signedDateLabel={signedDateLabel}
+                  repairAmount={repairAmount}
+                  signatureDataUrl={signatureDataUrl}
+                />
 
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <Label className="text-slate-200">Full name</Label>
                     <Input
                       value={fullName}
-                      onChange={(e) => setFullName(e.target.value)}
+                      onChange={(e) => {
+                        const nextName = smartCapsName(e.target.value);
+                        setFullName(nextName);
+                        setInitials(autoInitialsFromName(nextName));
+                      }}
                       placeholder="Your full legal name"
                       className="bg-white/5 border-white/10 text-slate-100 placeholder:text-slate-500"
                       disabled={!dayGate.allowed || submitting}
@@ -288,7 +332,14 @@ export default function AppointmentWaiverPage() {
                     <Label className="text-slate-200">Initials</Label>
                     <Input
                       value={initials}
-                      onChange={(e) => setInitials(e.target.value.toUpperCase())}
+                      onChange={(e) =>
+                        setInitials(
+                          e.target.value
+                            .toUpperCase()
+                            .replace(/[^A-Z]/g, "")
+                            .slice(0, 5)
+                        )
+                      }
                       placeholder="e.g., LH"
                       className="bg-white/5 border-white/10 text-slate-100 placeholder:text-slate-500"
                       maxLength={5}

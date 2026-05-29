@@ -17,9 +17,7 @@ import {
   Search,
   Mail,
   Phone,
-  Car,
   Calendar,
-  DollarSign,
   CheckCircle2,
   Shield,
   AlertTriangle,
@@ -37,24 +35,14 @@ type AnyObj = Record<string, any>;
 
 /** ---------------- Helpers ---------------- */
 
-function moneyFromInvoice(inv: AnyObj): number {
-  if (inv?.total_cents != null) {
-    const n = Number(inv.total_cents);
-    return Number.isFinite(n) ? n / 100 : 0;
-  }
-  if (inv?.total_amount != null) {
-    const n = Number(inv.total_amount);
-    return Number.isFinite(n) ? n : 0;
-  }
-  if (inv?.total != null) {
-    const n = Number(inv.total);
-    return Number.isFinite(n) ? n : 0;
-  }
-  return 0;
-}
-
 function normalizeEmail(v: any) {
   return String(v || "").trim().toLowerCase();
+}
+
+function normalizePhone(v: any) {
+  return String(v || "")
+    .trim()
+    .replace(/\D/g, "");
 }
 
 function safeDateMs(v: any) {
@@ -62,9 +50,72 @@ function safeDateMs(v: any) {
   return Number.isFinite(t) ? t : 0;
 }
 
-/**
- * ✅ TRUE portal activation detector (does NOT treat auth_user_id as "active")
- */
+function firstNonEmpty(...values: any[]) {
+  for (const v of values) {
+    if (v == null) continue;
+    const s = String(v).trim();
+    if (s) return s;
+  }
+  return "";
+}
+
+function newestDate(...values: any[]) {
+  let best = "";
+  let bestMs = 0;
+
+  for (const v of values) {
+    const ms = safeDateMs(v);
+    if (ms > bestMs) {
+      bestMs = ms;
+      best = String(v || "");
+    }
+  }
+
+  return best;
+}
+
+function formatPrettyDate(v: any) {
+  const ms = safeDateMs(v);
+  if (!ms) return "Not recorded";
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(ms));
+}
+
+/** ✅ TRUE invoice value */
+function invoiceTrueValueCents(inv: AnyObj): number {
+  const total = Number(inv?.total_cents ?? 0) || 0;
+  const customerPaid = Number(inv?.final_paid_cents ?? 0) || 0;
+  const insurancePortion = Number(inv?.insurance_due_cents ?? 0) || 0;
+  const combined = customerPaid + insurancePortion;
+  return Math.max(0, Math.min(total, combined));
+}
+
+function moneyFromInvoice(inv: AnyObj): number {
+  if (inv?.total_cents != null) {
+    const trueCents = invoiceTrueValueCents(inv);
+    if (trueCents > 0) return trueCents / 100;
+
+    const n = Number(inv.total_cents);
+    return Number.isFinite(n) ? n / 100 : 0;
+  }
+
+  if (inv?.total_amount != null) {
+    const n = Number(inv.total_amount);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  if (inv?.total != null) {
+    const n = Number(inv.total);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  return 0;
+}
+
 function isPortalActivatedFromUserRow(u: AnyObj) {
   return Boolean(
     u?.portal_activated_at ||
@@ -97,9 +148,22 @@ function isInviteCompleted(inv: AnyObj) {
   );
 }
 
-/** ---- data fetchers (reads only) ---- */
+function isoToYmd(value: any): string {
+  if (!value) return "";
+  const s = String(value);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
 
-async function fetchCustomers(): Promise<AnyObj[]> {
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return "";
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** ---------------- Data fetchers ---------------- */
+
+async function fetchAppUsers(): Promise<AnyObj[]> {
   const { data, error } = await supabaseClient
     .from("app_users")
     .select("*")
@@ -146,19 +210,10 @@ async function fetchInvoices(): Promise<AnyObj[]> {
   return legacy.data ?? [];
 }
 
-/**
- * ✅ Warranties (expanded fields so Resend Invite can call email API reliably)
- * We keep id/customer_email/warranty_number, plus:
- * - expiration_date (or expires_at)
- * - service_date
- * - service_performed
- */
 async function fetchWarranties(): Promise<AnyObj[]> {
   const { data, error } = await supabaseClient
     .from("warranties")
-    .select(
-      "id, customer_email, warranty_number, expiration_date, expires_at, service_date, service_performed"
-    )
+    .select("*")
     .order("created_at", { ascending: false });
 
   if (error) throw error;
@@ -175,7 +230,7 @@ async function fetchUserInvites(): Promise<AnyObj[]> {
   return res.data ?? [];
 }
 
-/** ---------------- Email: resend upgraded portal invite ---------------- */
+/** ---------------- Email ---------------- */
 
 type ResendInviteArgs = {
   email: string;
@@ -201,28 +256,187 @@ async function resendOldClientInvite(args: ResendInviteArgs) {
   return true;
 }
 
-function isoToYmd(value: any): string {
-  if (!value) return "";
-  const s = String(value);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+/** ---------------- Customer merge builder ---------------- */
 
-  const d = new Date(s);
-  if (Number.isNaN(d.getTime())) return "";
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+type UnifiedCustomer = AnyObj & {
+  source_app_user?: AnyObj | null;
+  synthetic?: boolean;
+  synthetic_key?: string;
+};
+
+function buildUnifiedCustomers(args: {
+  appUsers: AnyObj[];
+  appointments: AnyObj[];
+  vehicles: AnyObj[];
+  invoices: AnyObj[];
+  warranties: AnyObj[];
+  userInvites: AnyObj[];
+}): UnifiedCustomer[] {
+  const { appUsers, appointments, vehicles, invoices, warranties, userInvites } =
+    args;
+
+  const byPrimaryKey = new Map<string, UnifiedCustomer>();
+
+  function makeKey(email: string, phone: string) {
+    if (email) return `email:${email}`;
+    if (phone) return `phone:${phone}`;
+    return "";
+  }
+
+  function upsertPartial(partial: AnyObj, appUserCandidate?: AnyObj | null) {
+    const email = normalizeEmail(
+      partial?.email ||
+        partial?.customer_email ||
+        partial?.owner_email ||
+        partial?.user_email
+    );
+
+    const phone = normalizePhone(
+      partial?.phone || partial?.customer_phone || partial?.owner_phone
+    );
+
+    const key = makeKey(email, phone);
+    if (!key) return;
+
+    const existing = byPrimaryKey.get(key);
+
+    const baseName =
+      firstNonEmpty(
+        partial?.full_name,
+        partial?.customer_name,
+        partial?.name,
+        partial?.owner_name,
+        partial?.first_name && partial?.last_name
+          ? `${partial.first_name} ${partial.last_name}`
+          : "",
+        existing?.full_name
+      ) || "No Name";
+
+    const mergedAppUser =
+      appUserCandidate ||
+      existing?.source_app_user ||
+      (existing?.id && !String(existing.id).startsWith("synthetic:")
+        ? existing
+        : null);
+
+    const merged: UnifiedCustomer = {
+      ...(existing || {}),
+      full_name: baseName,
+      email: firstNonEmpty(
+        email,
+        existing?.email,
+        partial?.email,
+        partial?.customer_email,
+        partial?.owner_email,
+        partial?.user_email
+      ),
+      phone: firstNonEmpty(
+        phone,
+        normalizePhone(existing?.phone),
+        partial?.phone,
+        partial?.customer_phone,
+        partial?.owner_phone
+      ),
+      created_at: newestDate(
+        partial?.created_at,
+        partial?.invoice_date,
+        partial?.service_date,
+        existing?.created_at
+      ),
+      auth_user_id: firstNonEmpty(
+        partial?.auth_user_id,
+        existing?.auth_user_id,
+        mergedAppUser?.auth_user_id
+      ),
+      portal_activated_at: firstNonEmpty(
+        partial?.portal_activated_at,
+        existing?.portal_activated_at,
+        mergedAppUser?.portal_activated_at
+      ),
+      portal_invited_at: firstNonEmpty(
+        partial?.portal_invited_at,
+        partial?.invited_at,
+        existing?.portal_invited_at,
+        mergedAppUser?.portal_invited_at
+      ),
+      source_app_user: mergedAppUser || null,
+      synthetic: !mergedAppUser,
+      synthetic_key: key,
+      id: firstNonEmpty(mergedAppUser?.id, existing?.id, `synthetic:${key}`),
+    };
+
+    byPrimaryKey.set(key, merged);
+  }
+
+  for (const u of appUsers) {
+    upsertPartial(
+      {
+        ...u,
+        email: u?.email,
+        phone: u?.phone,
+        full_name: u?.full_name,
+      },
+      u
+    );
+  }
+
+  for (const a of appointments) {
+    upsertPartial({
+      email: a?.customer_email,
+      phone: a?.customer_phone || a?.phone,
+      full_name: a?.customer_name || a?.full_name,
+      created_at: a?.created_at,
+    });
+  }
+
+  for (const v of vehicles) {
+    upsertPartial({
+      email: v?.owner_email || v?.customer_email || v?.email,
+      phone: v?.owner_phone || v?.customer_phone || v?.phone,
+      full_name: v?.owner_name || v?.customer_name || v?.full_name,
+      created_at: v?.created_at,
+    });
+  }
+
+  for (const inv of invoices) {
+    upsertPartial({
+      email: inv?.customer_email,
+      phone: inv?.customer_phone || inv?.phone,
+      full_name: inv?.customer_name || inv?.full_name,
+      created_at: inv?.created_at || inv?.invoice_date,
+    });
+  }
+
+  for (const w of warranties) {
+    upsertPartial({
+      email: w?.customer_email,
+      full_name: "",
+      created_at: w?.created_at || w?.service_date,
+    });
+  }
+
+  for (const inv of userInvites) {
+    upsertPartial({
+      email: inv?.email || inv?.customer_email,
+      phone: inv?.phone || inv?.customer_phone,
+      full_name: inv?.full_name || inv?.customer_name,
+      created_at: inv?.created_at,
+      invited_at: inv?.created_at,
+    });
+  }
+
+  return Array.from(byPrimaryKey.values()).sort(
+    (a, b) => safeDateMs(b?.created_at) - safeDateMs(a?.created_at)
+  );
 }
 
 export default function AdminCustomersPage() {
   const searchParams = useSearchParams();
 
-  // Existing banner (from /new)
   const createdParam = searchParams.get("created");
   const inviteCode = searchParams.get("invite_code") || null;
   const showCreatedBanner = createdParam === "1";
 
-  // Optional: banner for old-client invite redirect
   const oldInviteParam = searchParams.get("old_invite");
   const oldInviteEmail = searchParams.get("email");
   const oldInviteWarranty = searchParams.get("warranty");
@@ -234,30 +448,26 @@ export default function AdminCustomersPage() {
   );
 
   const [search, setSearch] = React.useState("");
+  const [activeSortDir, setActiveSortDir] = React.useState<"desc" | "asc">(
+    "desc"
+  );
+  const [pendingSortDir, setPendingSortDir] = React.useState<"desc" | "asc">(
+    "desc"
+  );
 
-  // ✅ NEW: independent sort controls per section
-  const [activeSortDir, setActiveSortDir] = React.useState<"desc" | "asc">("desc");
-  const [pendingSortDir, setPendingSortDir] = React.useState<"desc" | "asc">("desc");
+  const { data: appUsers = [], isLoading: loadingAppUsers, error: appUsersError } =
+    useQuery({
+      queryKey: ["admin:appUsers"],
+      queryFn: fetchAppUsers,
+      staleTime: 15_000,
+    });
 
-  const {
-    data: customers = [],
-    isLoading: loadingCustomers,
-    error: customersError,
-  } = useQuery({
-    queryKey: ["admin:customers"],
-    queryFn: fetchCustomers,
-    staleTime: 15_000,
-  });
-
-  const {
-    data: appointments = [],
-    isLoading: loadingApts,
-    error: apptsError,
-  } = useQuery({
-    queryKey: ["admin:appointments:all"],
-    queryFn: fetchAppointments,
-    staleTime: 15_000,
-  });
+  const { data: appointments = [], isLoading: loadingApts, error: apptsError } =
+    useQuery({
+      queryKey: ["admin:appointments:all"],
+      queryFn: fetchAppointments,
+      staleTime: 15_000,
+    });
 
   const {
     data: vehicles = [],
@@ -299,6 +509,17 @@ export default function AdminCustomersPage() {
     staleTime: 15_000,
   });
 
+  const customers = React.useMemo(() => {
+    return buildUnifiedCustomers({
+      appUsers,
+      appointments,
+      vehicles,
+      invoices,
+      warranties,
+      userInvites,
+    });
+  }, [appUsers, appointments, vehicles, invoices, warranties, userInvites]);
+
   const totalRevenue = React.useMemo(() => {
     return invoices.reduce(
       (sum: number, inv: AnyObj) => sum + moneyFromInvoice(inv),
@@ -309,6 +530,7 @@ export default function AdminCustomersPage() {
   const filtered = React.useMemo(() => {
     if (!search) return customers;
     const q = search.toLowerCase();
+
     return customers.filter((c: AnyObj) => {
       const name = String(c.full_name ?? "").toLowerCase();
       const email = String(c.email ?? "").toLowerCase();
@@ -317,53 +539,149 @@ export default function AdminCustomersPage() {
     });
   }, [customers, search]);
 
-  function getCustomerStats(customerEmail: string) {
-    const ce = normalizeEmail(customerEmail);
-
-    const appts = appointments.filter(
-      (a: AnyObj) => normalizeEmail(a.customer_email) === ce
-    );
-
-    const cars = vehicles.filter(
-      (v: AnyObj) => normalizeEmail(v.owner_email) === ce
-    );
-
-    const invs = invoices.filter(
-      (i: AnyObj) => normalizeEmail(i.customer_email) === ce
-    );
-
-    const spent = invs.reduce(
-      (sum: number, inv: AnyObj) => sum + moneyFromInvoice(inv),
-      0
-    );
-
-    return {
-      appointmentCount: appts.length,
-      vehicleCount: cars.length,
-      totalSpent: spent,
-    };
-  }
-
   const inviteByEmail = React.useMemo(() => {
     const m = new Map<string, AnyObj>();
+
     for (const inv of userInvites) {
       const e = normalizeEmail(inv?.email || inv?.customer_email);
       if (!e) continue;
 
       const prev = m.get(e);
-      if (!prev) {
+      if (!prev || safeDateMs(inv?.created_at) >= safeDateMs(prev?.created_at)) {
         m.set(e, inv);
-        continue;
       }
-      const prevTime = safeDateMs(prev?.created_at);
-      const nextTime = safeDateMs(inv?.created_at);
-      if (nextTime >= prevTime) m.set(e, inv);
     }
+
     return m;
   }, [userInvites]);
 
+  const appUserByEmail = React.useMemo(() => {
+    const m = new Map<string, AnyObj>();
+
+    for (const u of appUsers) {
+      const e = normalizeEmail(u?.email);
+      if (!e) continue;
+
+      const prev = m.get(e);
+      if (!prev || safeDateMs(u?.created_at) >= safeDateMs(prev?.created_at)) {
+        m.set(e, u);
+      }
+    }
+
+    return m;
+  }, [appUsers]);
+
+  const invoicesByCustomerEmail = React.useMemo(() => {
+    const m = new Map<string, AnyObj[]>();
+
+    for (const inv of invoices) {
+      const e = normalizeEmail(inv?.customer_email || inv?.email);
+      if (!e) continue;
+
+      const list = m.get(e) || [];
+      list.push(inv);
+      m.set(e, list);
+    }
+
+    for (const [, list] of m) {
+      list.sort(
+        (a, b) =>
+          safeDateMs(b?.created_at || b?.invoice_date) -
+          safeDateMs(a?.created_at || a?.invoice_date)
+      );
+    }
+
+    return m;
+  }, [invoices]);
+
+  function findBestWarrantyForCustomer(customer: AnyObj): AnyObj | null {
+    const ce = normalizeEmail(customer?.email);
+    const customerInvoiceIds = new Set<string>();
+
+    const relatedInvoices = invoicesByCustomerEmail.get(ce) || [];
+    for (const inv of relatedInvoices) {
+      const id = firstNonEmpty(inv?.id);
+      if (id) customerInvoiceIds.add(String(id));
+    }
+
+    const matches = warranties.filter((w: AnyObj) => {
+      const warrantyEmail = normalizeEmail(w?.customer_email);
+      const warrantyInvoiceId = firstNonEmpty(w?.invoice_id);
+
+      const emailMatch = !!ce && warrantyEmail === ce;
+      const invoiceMatch =
+        !!warrantyInvoiceId && customerInvoiceIds.has(String(warrantyInvoiceId));
+
+      return emailMatch || invoiceMatch;
+    });
+
+    if (!matches.length) return null;
+
+    matches.sort(
+      (a, b) =>
+        safeDateMs(
+          b?.created_at || b?.updated_at || b?.service_date || b?.expires_at
+        ) -
+        safeDateMs(
+          a?.created_at || a?.updated_at || a?.service_date || a?.expires_at
+        )
+    );
+
+    return matches[0] || null;
+  }
+
+  function getLastServiceDate(customer: AnyObj) {
+    const ce = normalizeEmail(customer?.email);
+    const cp = normalizePhone(customer?.phone);
+    const dates: any[] = [];
+
+    for (const a of appointments) {
+      const emailMatch =
+        ce && normalizeEmail(a?.customer_email || a?.email) === ce;
+      const phoneMatch =
+        cp && normalizePhone(a?.customer_phone || a?.phone) === cp;
+
+      if (emailMatch || phoneMatch) {
+        dates.push(
+          a?.service_date,
+          a?.scheduled_date,
+          a?.completed_at,
+          a?.updated_at,
+          a?.created_at
+        );
+      }
+    }
+
+    for (const inv of invoices) {
+      const emailMatch =
+        ce && normalizeEmail(inv?.customer_email || inv?.email) === ce;
+      const phoneMatch =
+        cp && normalizePhone(inv?.customer_phone || inv?.phone) === cp;
+
+      if (emailMatch || phoneMatch) {
+        dates.push(
+          inv?.service_date,
+          inv?.invoice_date,
+          inv?.paid_at,
+          inv?.updated_at,
+          inv?.created_at
+        );
+      }
+    }
+
+    for (const w of warranties) {
+      const emailMatch = ce && normalizeEmail(w?.customer_email) === ce;
+
+      if (emailMatch) {
+        dates.push(w?.service_date, w?.updated_at, w?.created_at);
+      }
+    }
+
+    return newestDate(...dates);
+  }
+
   const loading =
-    loadingCustomers ||
+    loadingAppUsers ||
     loadingApts ||
     loadingVehicles ||
     loadingInvoices ||
@@ -371,14 +689,13 @@ export default function AdminCustomersPage() {
     loadingInvites;
 
   const anyError =
-    customersError ||
+    appUsersError ||
     apptsError ||
     vehiclesError ||
     invoicesError ||
     warrantiesError ||
     invitesError;
 
-  // Per-email UI feedback for resend
   const [sentByEmail, setSentByEmail] = React.useState<Record<string, string>>(
     {}
   );
@@ -398,6 +715,7 @@ export default function AdminCustomersPage() {
         err instanceof Error
           ? err.message
           : "We couldn’t resend the invite. Double-check the email API route.";
+
       setSentByEmail((prev) => ({
         ...prev,
         [ce]: msg,
@@ -405,38 +723,48 @@ export default function AdminCustomersPage() {
     },
   });
 
-  /** ✅ Central portal status calc (used for grouping + card rendering consistency) */
   function getPortalStatus(customer: AnyObj) {
     const email = String(customer.email || "");
     const ce = normalizeEmail(email);
 
+    const appUser = customer?.source_app_user || appUserByEmail.get(ce) || null;
     const invite = inviteByEmail.get(ce);
+
     const inviteTableSignal = Boolean(invite);
+
     const invitedAt =
       customer?.portal_invited_at ||
       customer?.portalInvitedAt ||
       customer?.invited_at ||
       customer?.invitedAt ||
       customer?.portal_invite_sent_at ||
-      customer?.portalInviteSentAt;
+      customer?.portalInviteSentAt ||
+      appUser?.portal_invited_at ||
+      appUser?.invited_at;
 
     const userRowInviteSignal = Boolean(invitedAt);
     const isInvited = inviteTableSignal || userRowInviteSignal;
 
-    const hasActivationSignal = isPortalActivatedFromUserRow(customer);
-    const hasAuthLink = Boolean(customer?.auth_user_id);
+    const hasActivationSignal =
+      isPortalActivatedFromUserRow(customer) ||
+      isPortalActivatedFromUserRow(appUser);
 
     const inviteCompletedFromTable = invite ? isInviteCompleted(invite) : false;
-    const inviteCompleted = inviteCompletedFromTable || hasActivationSignal;
 
-    const isPending = isInvited && !hasActivationSignal;
-    const isActive = hasActivationSignal || (hasAuthLink && !isInvited);
+    const isActive = hasActivationSignal || inviteCompletedFromTable;
+    const isPending = !isActive && isInvited;
     const isInactive = !isActive && !isPending;
 
-    return { isActive, isPending, isInactive, inviteCompleted, ce, email };
+    return {
+      isActive,
+      isPending,
+      isInactive,
+      inviteCompleted: inviteCompletedFromTable || hasActivationSignal,
+      ce,
+      email,
+    };
   }
 
-  /** ✅ Group first, then sort each group independently */
   const grouped = React.useMemo(() => {
     const active: AnyObj[] = [];
     const pending: AnyObj[] = [];
@@ -461,12 +789,10 @@ export default function AdminCustomersPage() {
       return pendingSortDir === "desc" ? bm - am : am - bm;
     });
 
-    // keep "other" stable (desc newest first by default)
     other.sort((a, b) => safeDateMs(b?.created_at) - safeDateMs(a?.created_at));
 
     return { active, pending, other, total: filtered.length };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filtered, inviteByEmail, activeSortDir, pendingSortDir]);
+  }, [filtered, activeSortDir, pendingSortDir, appUserByEmail, inviteByEmail]);
 
   function SectionHeader({
     title,
@@ -509,12 +835,9 @@ export default function AdminCustomersPage() {
             type="button"
             variant="outline"
             onClick={onToggleSort}
-            className={[
-              "h-9",
-              "border",
-              sortBtnClass,
-              "backdrop-blur-md",
-            ].join(" ")}
+            className={["h-9", "border", sortBtnClass, "backdrop-blur-md"].join(
+              " "
+            )}
           >
             <ArrowUpDown className="w-4 h-4 mr-2" />
             {sortDir === "desc" ? "Newest → Oldest" : "Oldest → Newest"}
@@ -525,37 +848,40 @@ export default function AdminCustomersPage() {
   }
 
   function CustomerCard({ customer }: { customer: AnyObj }) {
-    const id = String(customer.id || "");
     const name = (customer.full_name as string) || "No Name";
 
-    const { isActive, isPending, isInactive, ce, email } = getPortalStatus(
-      customer
-    );
+    const { isActive, isPending, isInactive, ce, email } =
+      getPortalStatus(customer);
 
-    const stats = getCustomerStats(email);
+    const appUser = customer?.source_app_user || appUserByEmail.get(ce) || null;
+
+    const lastLoginDate =
+      appUser?.last_sign_in_at ||
+      appUser?.last_login_at ||
+      appUser?.lastLoginAt ||
+      customer?.last_sign_in_at ||
+      customer?.last_login_at ||
+      customer?.lastLoginAt ||
+      "";
+
+    const lastServiceDate = getLastServiceDate(customer);
+
     const isHighlighted = !!highlightEmail && highlightEmail === ce;
-
-    // Warranty data for resend
-    const primaryWarranty = warranties.find(
-      (w: AnyObj) => normalizeEmail(w.customer_email) === ce
-    );
+    const primaryWarranty = findBestWarrantyForCustomer(customer);
 
     const warrantyNumber = String(primaryWarranty?.warranty_number || "").trim();
     const warrantyExpiration =
       isoToYmd(primaryWarranty?.expiration_date) ||
       isoToYmd(primaryWarranty?.expires_at);
 
-    const serviceDate = isoToYmd(primaryWarranty?.service_date);
+    const serviceDate =
+      isoToYmd(primaryWarranty?.service_date) || isoToYmd(lastServiceDate);
+
     const servicePerformed = String(
       primaryWarranty?.service_performed || "Windshield repair"
     ).trim();
 
-    const canResend =
-      Boolean(email) &&
-      Boolean(name) &&
-      Boolean(warrantyNumber) &&
-      Boolean(warrantyExpiration) &&
-      Boolean(serviceDate);
+    const canResend = Boolean(email);
 
     const isSendingThis =
       resendMutation.isPending &&
@@ -577,9 +903,17 @@ export default function AdminCustomersPage() {
         : "shadow-[0_0_95px_rgba(251,191,36,0.22)]"
       : "shadow-[0_0_45px_rgba(15,23,42,0.95)]";
 
+    const detailsHref = email
+      ? `/admin/portal/customers/${encodeURIComponent(
+          String(customer.id || `synthetic:${ce}`)
+        )}?email=${encodeURIComponent(email)}`
+      : `/admin/portal/customers/${encodeURIComponent(
+          String(customer.id || customer.synthetic_key || "unknown")
+        )}`;
+
     return (
       <Card
-        key={id || email}
+        key={String(customer.id || customer.synthetic_key || email)}
         id={`customer-${encodeURIComponent(ce)}`}
         className={[
           "border bg-slate-900/70 backdrop-blur-xl transition-all duration-300",
@@ -588,13 +922,12 @@ export default function AdminCustomersPage() {
         ].join(" ")}
       >
         <CardContent className="p-5 md:p-6">
-          <div className="flex flex-col md:flex-row gap-6 md:gap-8">
-            {/* Avatar / identity */}
+          <div className="flex flex-col gap-6 md:flex-row md:gap-8">
             <div className="flex items-center gap-4 md:w-1/3">
               <div className="relative flex-shrink-0">
                 <div className="absolute inset-0 rounded-full bg-cyan-500/30 blur-xl" />
-                <div className="relative w-16 h-16 rounded-full bg-gradient-to-br from-cyan-400 via-sky-500 to-blue-700 flex items-center justify-center shadow-[0_0_40px_rgba(34,211,238,0.8)]">
-                  <span className="text-slate-950 font-bold text-xl">
+                <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-cyan-400 via-sky-500 to-blue-700 shadow-[0_0_40px_rgba(34,211,238,0.8)]">
+                  <span className="text-xl font-bold text-slate-950">
                     {name?.charAt(0)?.toUpperCase() ||
                       email?.charAt(0)?.toUpperCase() ||
                       "C"}
@@ -605,34 +938,37 @@ export default function AdminCustomersPage() {
               <div>
                 <h3 className="text-lg font-semibold text-slate-50">{name}</h3>
 
-                <div className="mt-1 flex items-center gap-2 flex-wrap">
-                  <Badge
-                    variant="outline"
-                    className="text-[11px] border-cyan-400/60 text-cyan-100 bg-cyan-500/10"
-                  >
+                <div className="mt-1 flex flex-wrap items-center gap-2">
+                  <span className="inline-flex items-center gap-1 rounded-full border border-cyan-300/60 bg-cyan-300/15 px-2 py-0.5 text-[11px] font-semibold text-cyan-50">
                     Customer
-                  </Badge>
+                  </span>
+
+                  {customer?.synthetic ? (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-slate-400/25 bg-slate-500/10 px-2 py-0.5 text-[11px] text-slate-200">
+                      Merged Record
+                    </span>
+                  ) : null}
 
                   {isActive ? (
-                    <span className="inline-flex items-center gap-1 text-[11px] text-cyan-100 bg-cyan-500/15 border border-cyan-400/60 px-2 py-0.5 rounded-full shadow-[0_0_16px_rgba(34,211,238,0.55)]">
-                      <CheckCircle2 className="w-3 h-3" />
+                    <span className="inline-flex items-center gap-1 rounded-full border border-cyan-400/60 bg-cyan-500/15 px-2 py-0.5 text-[11px] text-cyan-100 shadow-[0_0_16px_rgba(34,211,238,0.55)]">
+                      <CheckCircle2 className="h-3 w-3" />
                       Portal Active
                     </span>
                   ) : isPending ? (
-                    <span className="inline-flex items-center gap-1 text-[11px] text-amber-100 bg-amber-500/15 border border-amber-400/60 px-2 py-0.5 rounded-full shadow-[0_0_16px_rgba(251,191,36,0.45)]">
-                      <Clock className="w-3 h-3" />
+                    <span className="inline-flex items-center gap-1 rounded-full border border-amber-400/60 bg-amber-500/15 px-2 py-0.5 text-[11px] text-amber-100 shadow-[0_0_16px_rgba(251,191,36,0.45)]">
+                      <Clock className="h-3 w-3" />
                       Pending Activation
                     </span>
                   ) : isInactive ? (
-                    <span className="inline-flex items-center gap-1 text-[11px] text-amber-100 bg-amber-500/10 border border-amber-500/35 px-2 py-0.5 rounded-full">
-                      <Ban className="w-3 h-3" />
+                    <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/35 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-100">
+                      <Ban className="h-3 w-3" />
                       Portal Inactive
                     </span>
                   ) : null}
 
                   {isHighlighted && (
-                    <span className="inline-flex items-center gap-1 text-[11px] text-slate-100 bg-slate-500/10 border border-slate-400/30 px-2 py-0.5 rounded-full">
-                      <ArrowRight className="w-3 h-3" />
+                    <span className="inline-flex items-center gap-1 rounded-full border border-slate-400/30 bg-slate-500/10 px-2 py-0.5 text-[11px] text-slate-100">
+                      <ArrowRight className="h-3 w-3" />
                       Recently invited
                     </span>
                   )}
@@ -640,73 +976,56 @@ export default function AdminCustomersPage() {
               </div>
             </div>
 
-            {/* Details + stats */}
-            <div className="flex-1 grid md:grid-cols-2 gap-4 text-sm">
+            <div className="grid flex-1 gap-4 text-sm md:grid-cols-2">
               <div className="space-y-2">
-                <div className="flex items-center gap-2 text-slate-200 break-all">
-                  <Mail className="w-4 h-4 text-cyan-300" />
-                  <span>{email}</span>
+                <div className="flex items-center gap-2 break-all text-slate-100">
+                  <Mail className="h-4 w-4 text-cyan-300" />
+                  <span>{email || "No email found"}</span>
                 </div>
-                {customer.phone && (
-                  <div className="flex items-center gap-2 text-slate-200">
-                    <Phone className="w-4 h-4 text-cyan-300" />
+
+                {customer.phone ? (
+                  <div className="flex items-center gap-2 text-slate-100">
+                    <Phone className="h-4 w-4 text-cyan-300" />
                     <span>{customer.phone}</span>
                   </div>
-                )}
-                {primaryWarranty?.warranty_number && (
-                  <div className="flex items-center gap-2 text-slate-200">
-                    <Shield className="w-4 h-4 text-cyan-300" />
-                    <span className="text-xs text-slate-300">
-                      Warranty:{" "}
-                      <span className="font-mono text-slate-100">
-                        {primaryWarranty.warranty_number}
-                      </span>
-                    </span>
-                  </div>
-                )}
+                ) : null}
               </div>
 
               <div className="space-y-2">
-                <div className="flex items-center justify-between text-slate-200">
-                  <span className="flex items-center gap-1 text-slate-400">
-                    <Calendar className="w-4 h-4 text-slate-300" />
-                    Appointments
+                <div className="flex items-center justify-between gap-4 text-slate-100">
+                  <span className="flex items-center gap-1 text-slate-300">
+                    <Clock className="h-4 w-4 text-cyan-300" />
+                    Last Login
                   </span>
-                  <span className="font-semibold">{stats.appointmentCount}</span>
+                  <span className="text-right font-semibold">
+                    {formatPrettyDate(lastLoginDate)}
+                  </span>
                 </div>
-                <div className="flex items-center justify-between text-slate-200">
-                  <span className="flex items-center gap-1 text-slate-400">
-                    <Car className="w-4 h-4 text-slate-300" />
-                    Vehicles
+
+                <div className="flex items-center justify-between gap-4 text-slate-100">
+                  <span className="flex items-center gap-1 text-slate-300">
+                    <Calendar className="h-4 w-4 text-cyan-300" />
+                    Last Service
                   </span>
-                  <span className="font-semibold">{stats.vehicleCount}</span>
-                </div>
-                <div className="flex items-center justify-between text-slate-200">
-                  <span className="flex items-center gap-1 text-slate-400">
-                    <DollarSign className="w-4 h-4 text-slate-300" />
-                    Lifetime Value
-                  </span>
-                  <span className="font-semibold text-emerald-300">
-                    ${stats.totalSpent.toFixed(2)}
+                  <span className="text-right font-semibold">
+                    {formatPrettyDate(lastServiceDate)}
                   </span>
                 </div>
               </div>
             </div>
 
-            {/* Actions */}
-            <div className="flex flex-col items-stretch justify-center gap-2 min-w-[260px]">
-              <Link href={`/admin/portal/customers/${encodeURIComponent(id)}`}>
+            <div className="flex min-w-[260px] flex-col items-stretch justify-center gap-2">
+              <Link href={detailsHref}>
                 <Button
                   size="sm"
                   className="w-full bg-gradient-to-r from-cyan-400 via-sky-500 to-blue-700 text-slate-950 shadow-[0_0_25px_rgba(34,211,238,0.55)] hover:shadow-[0_0_35px_rgba(34,211,238,0.75)]"
                 >
-                  <UserRoundCog className="w-4 h-4 mr-2" />
+                  <UserRoundCog className="mr-2 h-4 w-4" />
                   Manage Customer
-                  <ChevronRight className="w-4 h-4 ml-2" />
+                  <ChevronRight className="ml-2 h-4 w-4" />
                 </Button>
               </Link>
 
-              {/* ✅ Resend upgraded portal invite */}
               {!isActive && (
                 <Button
                   size="sm"
@@ -732,7 +1051,7 @@ export default function AdminCustomersPage() {
                     "w-full text-slate-950 shadow-[0_0_25px_rgba(16,185,129,0.35)]",
                     canResend
                       ? "bg-emerald-500 hover:bg-emerald-400"
-                      : "bg-slate-700/70 hover:bg-slate-700/70 cursor-not-allowed",
+                      : "cursor-not-allowed bg-slate-700/70 hover:bg-slate-700/70",
                   ].join(" ")}
                 >
                   {isSendingThis ? (
@@ -742,7 +1061,7 @@ export default function AdminCustomersPage() {
                     </span>
                   ) : (
                     <span className="inline-flex items-center gap-2">
-                      <Send className="w-4 h-4" />
+                      <Send className="h-4 w-4" />
                       Resend portal invite
                     </span>
                   )}
@@ -762,15 +1081,14 @@ export default function AdminCustomersPage() {
   }
 
   return (
-    <div className="min-h-screen p-4 md:p-8 bg-[radial-gradient(circle_at_top,_#1e293b_0,_#020617_40%,_#000000_100%)] text-slate-100">
-      <div className="max-w-7xl mx-auto">
-        {/* Header + buttons */}
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_#1e293b_0,_#020617_40%,_#000000_100%)] p-4 text-slate-100 md:p-8">
+      <div className="mx-auto max-w-7xl">
         <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div className="inline-flex items-center gap-3">
             <div className="relative">
               <div className="absolute inset-0 rounded-full bg-cyan-500/30 blur-xl" />
               <div className="relative flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-cyan-400 via-sky-500 to-blue-700 shadow-[0_0_25px_rgba(34,211,238,0.5)]">
-                <Users className="w-6 h-6 text-slate-950" />
+                <Users className="h-6 w-6 text-slate-950" />
               </div>
             </div>
             <div>
@@ -783,27 +1101,25 @@ export default function AdminCustomersPage() {
             </div>
           </div>
 
-          {/* Buttons */}
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
             <Link href="/admin/portal/customers/createoldclientportal">
-              <Button className="bg-emerald-500 hover:bg-emerald-600 text-slate-950 shadow-[0_0_25px_rgba(16,185,129,0.55)]">
-                <Shield className="w-4 h-4 mr-2" />
+              <Button className="bg-emerald-500 text-slate-950 shadow-[0_0_25px_rgba(16,185,129,0.55)] hover:bg-emerald-600">
+                <Shield className="mr-2 h-4 w-4" />
                 + Create Old Client Portal
               </Button>
             </Link>
 
             <Link href="/admin/portal/customers/new">
-              <Button className="bg-cyan-500 hover:bg-cyan-600 text-slate-950 shadow-[0_0_25px_rgba(34,211,238,0.7)]">
+              <Button className="bg-cyan-500 text-slate-950 shadow-[0_0_25px_rgba(34,211,238,0.7)] hover:bg-cyan-600">
                 + New Customer
               </Button>
             </Link>
           </div>
         </div>
 
-        {/* Banner: from /new */}
         {showCreatedBanner && (
-          <div className="mb-6 rounded-md border border-emerald-500/80 bg-emerald-900/60 px-4 py-3 text-sm text-emerald-50 flex items-start gap-2">
-            <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" />
+          <div className="mb-6 flex items-start gap-2 rounded-md border border-emerald-500/80 bg-emerald-900/60 px-4 py-3 text-sm text-emerald-50">
+            <CheckCircle2 className="mt-0.5 h-4 w-4 flex-shrink-0" />
             <div>
               <p className="font-medium">Customer invite created successfully.</p>
               {inviteCode && inviteCode !== "Created" && (
@@ -815,19 +1131,19 @@ export default function AdminCustomersPage() {
                 </p>
               )}
               <p className="mt-1 text-xs text-emerald-100/80">
-                We&apos;ve emailed them a link to create their account. You can
-                now attach this customer to appointments, vehicles, and invoices.
+                We&apos;ve emailed them a link to create their account.
               </p>
             </div>
           </div>
         )}
 
-        {/* Banner: from old-client invite */}
         {showOldInviteBanner && (
-          <div className="mb-6 rounded-md border border-cyan-400/70 bg-cyan-900/35 px-4 py-3 text-sm text-cyan-50 flex items-start gap-2">
-            <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0 text-cyan-200" />
+          <div className="mb-6 flex items-start gap-2 rounded-md border border-cyan-400/70 bg-cyan-900/35 px-4 py-3 text-sm text-cyan-50">
+            <CheckCircle2 className="mt-0.5 h-4 w-4 flex-shrink-0 text-cyan-200" />
             <div className="flex-1">
-              <p className="font-medium">Old client portal invite sent successfully.</p>
+              <p className="font-medium">
+                Old client portal invite sent successfully.
+              </p>
 
               {(oldInviteEmail || oldInviteWarranty) && (
                 <p className="mt-1 text-xs text-cyan-100/80">
@@ -847,8 +1163,7 @@ export default function AdminCustomersPage() {
               )}
 
               <p className="mt-1 text-xs text-cyan-100/80">
-                They can now create a password and access their warranty + repair
-                history.
+                They can now create a password and access their repair history.
               </p>
 
               {highlightEmail && (
@@ -865,40 +1180,36 @@ export default function AdminCustomersPage() {
           </div>
         )}
 
-        {/* Error state */}
         {anyError && !loading && (
-          <div className="mb-6 rounded-md border border-red-500/60 bg-red-950/40 px-4 py-3 text-sm text-red-100 flex items-start gap-2">
-            <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+          <div className="mb-6 flex items-start gap-2 rounded-md border border-red-500/60 bg-red-950/40 px-4 py-3 text-sm text-red-100">
+            <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
             <div>
               <p className="font-medium">Something failed while loading data.</p>
               <p className="mt-1 text-xs text-red-200/80">
-                Check console for the exact Supabase error (likely table name
-                mismatch or RLS).
+                Check console for the exact Supabase error.
               </p>
             </div>
           </div>
         )}
 
-        {/* Search */}
-        <Card className="mb-6 border border-cyan-500/10 bg-slate-900/60 backdrop-blur-xl shadow-[0_0_40px_rgba(15,23,42,0.85)]">
+        <Card className="mb-6 border border-cyan-500/10 bg-slate-900/60 shadow-[0_0_40px_rgba(15,23,42,0.85)] backdrop-blur-xl">
           <CardContent className="p-4 md:p-6">
             <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
               <Input
                 placeholder="Search by name, email, or phone..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="pl-10 bg-slate-950/70 border border-slate-700/80 text-slate-100 placeholder:text-slate-500 focus-visible:ring-2 focus-visible:ring-cyan-400/70 focus-visible:border-cyan-400/70 shadow-[0_0_20px_rgba(15,23,42,0.8)]"
+                className="border border-slate-700/80 bg-slate-950/70 pl-10 text-slate-100 shadow-[0_0_20px_rgba(15,23,42,0.8)] placeholder:text-slate-500 focus-visible:border-cyan-400/70 focus-visible:ring-2 focus-visible:ring-cyan-400/70"
               />
             </div>
           </CardContent>
         </Card>
 
-        {/* Stats Overview */}
-        <div className="grid md:grid-cols-4 gap-4 mb-8">
-          <Card className="border border-cyan-500/20 bg-gradient-to-br from-sky-500/20 via-cyan-500/10 to-slate-900/80 backdrop-blur-xl shadow-[0_0_50px_rgba(56,189,248,0.45)]">
+        <div className="mb-8 grid gap-4 md:grid-cols-4">
+          <Card className="border border-cyan-500/20 bg-gradient-to-br from-sky-500/20 via-cyan-500/10 to-slate-900/80 shadow-[0_0_50px_rgba(56,189,248,0.45)] backdrop-blur-xl">
             <CardContent className="p-5">
-              <p className="text-xs uppercase tracking-[0.15em] text-cyan-200/90 mb-1">
+              <p className="mb-1 text-xs uppercase tracking-[0.15em] text-cyan-200/90">
                 Total Customers
               </p>
               <p className="text-3xl font-semibold text-slate-50">
@@ -907,9 +1218,9 @@ export default function AdminCustomersPage() {
             </CardContent>
           </Card>
 
-          <Card className="border border-emerald-500/20 bg-gradient-to-br from-emerald-500/20 via-emerald-500/10 to-slate-900/80 backdrop-blur-xl shadow-[0_0_50px_rgba(16,185,129,0.45)]">
+          <Card className="border border-emerald-500/20 bg-gradient-to-br from-emerald-500/20 via-emerald-500/10 to-slate-900/80 shadow-[0_0_50px_rgba(16,185,129,0.45)] backdrop-blur-xl">
             <CardContent className="p-5">
-              <p className="text-xs uppercase tracking-[0.15em] text-emerald-200/90 mb-1">
+              <p className="mb-1 text-xs uppercase tracking-[0.15em] text-emerald-200/90">
                 Total Revenue
               </p>
               <p className="text-3xl font-semibold text-emerald-100">
@@ -918,9 +1229,9 @@ export default function AdminCustomersPage() {
             </CardContent>
           </Card>
 
-          <Card className="border border-violet-500/20 bg-gradient-to-br from-violet-500/25 via-indigo-500/10 to-slate-900/80 backdrop-blur-xl shadow-[0_0_50px_rgba(129,140,248,0.45)]">
+          <Card className="border border-violet-500/20 bg-gradient-to-br from-violet-500/25 via-indigo-500/10 to-slate-900/80 shadow-[0_0_50px_rgba(129,140,248,0.45)] backdrop-blur-xl">
             <CardContent className="p-5">
-              <p className="text-xs uppercase tracking-[0.15em] text-violet-200/90 mb-1">
+              <p className="mb-1 text-xs uppercase tracking-[0.15em] text-violet-200/90">
                 Total Vehicles
               </p>
               <p className="text-3xl font-semibold text-violet-100">
@@ -929,9 +1240,9 @@ export default function AdminCustomersPage() {
             </CardContent>
           </Card>
 
-          <Card className="border border-amber-400/25 bg-gradient-to-br from-amber-400/25 via-orange-500/10 to-slate-900/80 backdrop-blur-xl shadow-[0_0_50px_rgba(251,191,36,0.4)]">
+          <Card className="border border-amber-400/25 bg-gradient-to-br from-amber-400/25 via-orange-500/10 to-slate-900/80 shadow-[0_0_50px_rgba(251,191,36,0.4)] backdrop-blur-xl">
             <CardContent className="p-5">
-              <p className="text-xs uppercase tracking-[0.15em] text-amber-100/90 mb-1">
+              <p className="mb-1 text-xs uppercase tracking-[0.15em] text-amber-100/90">
                 Total Services
               </p>
               <p className="text-3xl font-semibold text-amber-50">
@@ -941,18 +1252,15 @@ export default function AdminCustomersPage() {
           </Card>
         </div>
 
-        {/* Loading state */}
         {loading && (
           <div className="py-24 text-center text-slate-400">
-            <div className="mx-auto h-10 w-10 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin mb-4 shadow-[0_0_25px_rgba(34,211,238,0.75)]" />
+            <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-2 border-cyan-400 border-t-transparent shadow-[0_0_25px_rgba(34,211,238,0.75)]" />
             Loading customer constellation…
           </div>
         )}
 
-        {/* Grouped Customer Lists */}
         {!loading && (
           <div className="space-y-10">
-            {/* ✅ Active first */}
             <div className="space-y-4">
               <SectionHeader
                 title="Portal Active"
@@ -965,22 +1273,25 @@ export default function AdminCustomersPage() {
                 }
                 sortTone="cyan"
               />
+
               {grouped.active.length > 0 ? (
                 <div className="space-y-4">
                   {grouped.active.map((c) => (
-                    <CustomerCard key={String(c.id || c.email)} customer={c} />
+                    <CustomerCard
+                      key={String(c.id || c.synthetic_key || c.email)}
+                      customer={c}
+                    />
                   ))}
                 </div>
               ) : (
-                <Card className="border border-dashed border-slate-600/80 bg-slate-900/70 backdrop-blur-xl shadow-[0_0_35px_rgba(15,23,42,0.9)]">
-                  <CardContent className="py-10 text-center text-slate-400 text-sm">
+                <Card className="border border-dashed border-slate-600/80 bg-slate-900/70 shadow-[0_0_35px_rgba(15,23,42,0.9)] backdrop-blur-xl">
+                  <CardContent className="py-10 text-center text-sm text-slate-400">
                     No active portal customers in this view.
                   </CardContent>
                 </Card>
               )}
             </div>
 
-            {/* ✅ Pending second */}
             <div className="space-y-4">
               <SectionHeader
                 title="Pending Activation"
@@ -993,22 +1304,25 @@ export default function AdminCustomersPage() {
                 }
                 sortTone="amber"
               />
+
               {grouped.pending.length > 0 ? (
                 <div className="space-y-4">
                   {grouped.pending.map((c) => (
-                    <CustomerCard key={String(c.id || c.email)} customer={c} />
+                    <CustomerCard
+                      key={String(c.id || c.synthetic_key || c.email)}
+                      customer={c}
+                    />
                   ))}
                 </div>
               ) : (
-                <Card className="border border-dashed border-slate-600/80 bg-slate-900/70 backdrop-blur-xl shadow-[0_0_35px_rgba(15,23,42,0.9)]">
-                  <CardContent className="py-10 text-center text-slate-400 text-sm">
+                <Card className="border border-dashed border-slate-600/80 bg-slate-900/70 shadow-[0_0_35px_rgba(15,23,42,0.9)] backdrop-blur-xl">
+                  <CardContent className="py-10 text-center text-sm text-slate-400">
                     No pending activations in this view.
                   </CardContent>
                 </Card>
               )}
             </div>
 
-            {/* (Kept) Other / Inactive */}
             <div className="space-y-4">
               <SectionHeader
                 title="Other / Inactive"
@@ -1016,15 +1330,19 @@ export default function AdminCustomersPage() {
                 count={grouped.other.length}
                 badgeClassName="bg-slate-500/15 text-slate-200 border border-slate-400/30"
               />
+
               {grouped.other.length > 0 ? (
                 <div className="space-y-4">
                   {grouped.other.map((c) => (
-                    <CustomerCard key={String(c.id || c.email)} customer={c} />
+                    <CustomerCard
+                      key={String(c.id || c.synthetic_key || c.email)}
+                      customer={c}
+                    />
                   ))}
                 </div>
               ) : (
-                <Card className="border border-dashed border-slate-600/80 bg-slate-900/70 backdrop-blur-xl shadow-[0_0_35px_rgba(15,23,42,0.9)]">
-                  <CardContent className="py-10 text-center text-slate-400 text-sm">
+                <Card className="border border-dashed border-slate-600/80 bg-slate-900/70 shadow-[0_0_35px_rgba(15,23,42,0.9)] backdrop-blur-xl">
+                  <CardContent className="py-10 text-center text-sm text-slate-400">
                     No other customers in this view.
                   </CardContent>
                 </Card>
@@ -1032,10 +1350,10 @@ export default function AdminCustomersPage() {
             </div>
 
             {grouped.total === 0 && (
-              <Card className="border border-dashed border-slate-600/80 bg-slate-900/70 backdrop-blur-xl shadow-[0_0_35px_rgba(15,23,42,0.9)]">
+              <Card className="border border-dashed border-slate-600/80 bg-slate-900/70 shadow-[0_0_35px_rgba(15,23,42,0.9)] backdrop-blur-xl">
                 <CardContent className="py-16 text-center">
-                  <Users className="w-16 h-16 mx-auto mb-4 text-slate-600" />
-                  <h3 className="text-xl font-semibold text-slate-100 mb-2">
+                  <Users className="mx-auto mb-4 h-16 w-16 text-slate-600" />
+                  <h3 className="mb-2 text-xl font-semibold text-slate-100">
                     No Customers Found
                   </h3>
                   <p className="text-slate-400">Try adjusting your search.</p>

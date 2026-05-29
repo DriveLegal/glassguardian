@@ -1,14 +1,10 @@
 // app/layout.tsx
 import "./globals.css";
 import type { ReactNode } from "react";
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Quicksand } from "next/font/google";
 
-import Providers from "./providers";
-import GlobalBackgroundGate from "@/components/GlobalBackgroundGate";
-
-import { Analytics } from "@vercel/analytics/next";
-import { SpeedInsights } from "@vercel/speed-insights/next";
+import ClientRoot from "./ClientRoot";
 
 const quicksand = Quicksand({
   subsets: ["latin"],
@@ -23,23 +19,32 @@ export const metadata: Metadata = {
     "Premium mobile chip & crack repair. Insurance-friendly, fast, guaranteed.",
 };
 
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+  viewportFit: "cover",
+  themeColor: "#050505",
+};
+
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html
       lang="en"
-      className={quicksand.variable}
+      className={`${quicksand.variable} dark`}
+      data-scroll-behavior="smooth"
       suppressHydrationWarning
     >
-      <body className="min-h-screen bg-slate-950 text-slate-50">
-        {/* Route-aware, lazy background */}
-        <GlobalBackgroundGate />
-
-        {/* Global providers (React Query, etc.) */}
-        <Providers>{children}</Providers>
-
-        {/* Vercel telemetry */}
-        <Analytics />
-        <SpeedInsights />
+      <body
+        className="
+          bg-[#050505]
+          text-slate-50
+          antialiased
+          [font-synthesis-weight:none]
+          [text-rendering:optimizeLegibility]
+        "
+      >
+        <ClientRoot>{children}</ClientRoot>
       </body>
     </html>
   );

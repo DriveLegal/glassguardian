@@ -1,3 +1,4 @@
+//app/user/(protected)/dashboard/pay/success/page.tsx
 import { Suspense } from "react";
 import { SuccessClient } from "./SuccessClient";
 

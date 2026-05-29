@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabaseClient } from "@/lib/supabaseClient";
 import type { Message } from "./MessageBubble";
 
-const SUPPORT_EMAIL = "support@glassguardian.com";
+const SUPPORT_EMAIL = "info@glassguardianchipandcrackrepair.com";
 
 type UseMessagesOpts = {
   /** Limit to a given appointment thread (optional) */

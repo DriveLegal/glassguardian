@@ -146,10 +146,8 @@ export default function UserLoginPage() {
         }}
       >
         <CosmicScene
-          variant="prime"
-          enableParallax={enableAmbient}
-          enableMeteors={enableAmbient}
-          enableConstellation={enableAmbient}
+          intensity="rich"
+          animated={enableAmbient}
         />
 
         {/* Taller layout: center area + bottom trust + extra spacing */}

@@ -7,7 +7,7 @@ import { supabaseClient } from "@/lib/supabaseClient";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ShieldCheck } from "lucide-react";
+import { ShieldCheck, ScanSearch } from "lucide-react";
 
 /* 9-quadrant windshield grid mapping */
 const QUADRANTS = [
@@ -46,8 +46,8 @@ function getActiveQuadrantIds(repairs: any[] | null | undefined): Set<string> {
 function quadrantFromXY(x: number, y: number) {
   const cx = Math.min(0.9999, Math.max(0, x));
   const cy = Math.min(0.9999, Math.max(0, y));
-  const col = Math.floor(cx * 3); // 0..2
-  const row = Math.floor(cy * 3); // 0..2
+  const col = Math.floor(cx * 3);
+  const row = Math.floor(cy * 3);
   const idx = row * 3 + col;
   return QUADRANTS[idx] || QUADRANTS[4];
 }
@@ -106,31 +106,31 @@ function MarkerModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-      <div className="relative z-10 w-full max-w-lg bg-white rounded-lg shadow-lg p-4">
-        <h3 className="text-lg font-semibold mb-2">
+      <div className="relative z-10 w-full max-w-lg rounded-2xl border border-amber-300/20 bg-[linear-gradient(180deg,rgba(255,221,128,0.10),rgba(42,42,46,0.94)_18%,rgba(28,28,31,0.98)_100%)] p-4 text-amber-50 shadow-[0_28px_80px_rgba(0,0,0,0.48),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-2xl">
+        <h3 className="mb-3 text-lg font-semibold">
           Marker — {Math.round(marker.x * 100)}%, {Math.round(marker.y * 100)}%
         </h3>
 
-        <div className="space-y-2">
-          <div className="flex gap-2 items-center">
-            <label className="text-sm font-medium">Mode:</label>
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-sm font-medium text-amber-100/80">Mode:</label>
             <div className="flex gap-2">
               <button
                 onClick={() => setMode("create")}
-                className={`px-3 py-1 rounded ${
+                className={`rounded-lg px-3 py-1.5 text-sm ${
                   mode === "create"
-                    ? "bg-sky-600 text-white"
-                    : "bg-slate-100 text-slate-700"
+                    ? "bg-amber-300 text-[#1a1208]"
+                    : "bg-[rgba(44,44,47,0.56)] text-amber-50"
                 }`}
               >
                 Create new repair
               </button>
               <button
                 onClick={() => setMode("attach")}
-                className={`px-3 py-1 rounded ${
+                className={`rounded-lg px-3 py-1.5 text-sm ${
                   mode === "attach"
-                    ? "bg-sky-600 text-white"
-                    : "bg-slate-100 text-slate-700"
+                    ? "bg-amber-300 text-[#1a1208]"
+                    : "bg-[rgba(44,44,47,0.56)] text-amber-50"
                 }`}
               >
                 Attach to existing
@@ -140,11 +140,11 @@ function MarkerModal({
 
           {mode === "attach" && (
             <div>
-              <label className="block text-sm font-medium">
+              <label className="block text-sm font-medium text-amber-100/78">
                 Select existing repair
               </label>
               <select
-                className="w-full mt-1 p-2 border rounded"
+                className="mt-1 w-full rounded-xl border border-white/10 bg-[rgba(28,28,31,0.66)] p-2 text-amber-50 outline-none"
                 value={selectedIndex ?? ""}
                 onChange={(e) =>
                   setSelectedIndex(
@@ -165,9 +165,11 @@ function MarkerModal({
           )}
 
           <div>
-            <label className="block text-sm font-medium">Damage Type</label>
+            <label className="block text-sm font-medium text-amber-100/78">
+              Damage Type
+            </label>
             <input
-              className="w-full mt-1 p-2 border rounded"
+              className="mt-1 w-full rounded-xl border border-white/10 bg-[rgba(28,28,31,0.66)] p-2 text-amber-50 outline-none"
               value={damageType ?? ""}
               onChange={(e) => setDamageType(e.target.value || null)}
               placeholder="e.g. bullseye, star, crack"
@@ -175,14 +177,14 @@ function MarkerModal({
           </div>
 
           <div>
-            <label className="block text-sm font-medium">
+            <label className="block text-sm font-medium text-amber-100/78">
               Crack Length (inches)
             </label>
             <input
               type="number"
               step="0.1"
               min="0"
-              className="w-full mt-1 p-2 border rounded"
+              className="mt-1 w-full rounded-xl border border-white/10 bg-[rgba(28,28,31,0.66)] p-2 text-amber-50 outline-none"
               value={crackLen ?? ""}
               onChange={(e) =>
                 setCrackLen(e.target.value === "" ? null : Number(e.target.value))
@@ -192,17 +194,22 @@ function MarkerModal({
           </div>
 
           <div>
-            <label className="block text-sm font-medium">Notes</label>
+            <label className="block text-sm font-medium text-amber-100/78">
+              Notes
+            </label>
             <textarea
-              className="w-full mt-1 p-2 border rounded"
+              className="mt-1 w-full rounded-xl border border-white/10 bg-[rgba(28,28,31,0.66)] p-2 text-amber-50 outline-none"
               rows={3}
               value={notes ?? ""}
               onChange={(e) => setNotes(e.target.value || null)}
             />
           </div>
 
-          <div className="flex justify-end gap-2 mt-3">
-            <button onClick={onClose} className="px-3 py-2 rounded border">
+          <div className="mt-4 flex justify-end gap-2">
+            <button
+              onClick={onClose}
+              className="rounded-lg border border-white/10 bg-[rgba(44,44,47,0.56)] px-3 py-2 text-amber-50"
+            >
               Cancel
             </button>
             {mode === "create" ? (
@@ -217,7 +224,7 @@ function MarkerModal({
                     notes,
                   })
                 }
-                className="px-3 py-2 rounded bg-emerald-500 text-white"
+                className="rounded-lg bg-gradient-to-r from-amber-300 to-yellow-400 px-3 py-2 font-semibold text-[#1a1208]"
               >
                 Save as new repair
               </button>
@@ -236,7 +243,7 @@ function MarkerModal({
                     notes,
                   })
                 }
-                className="px-3 py-2 rounded bg-sky-600 text-white disabled:opacity-60"
+                className="rounded-lg bg-gradient-to-r from-amber-300 to-yellow-400 px-3 py-2 font-semibold text-[#1a1208] disabled:opacity-60"
               >
                 Update selected repair
               </button>
@@ -286,7 +293,6 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
     [invoice.windshield_repairs_json]
   );
 
-  // Saved markers from JSON
   const savedMarkers = React.useMemo(() => {
     const arr = invoice.windshield_repairs_json ?? [];
     const markers: { id: string; x: number; y: number; sourceIndex: number }[] =
@@ -312,12 +318,6 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
     return markers;
   }, [invoice.windshield_repairs_json]);
 
-  /**
-   * ✅ BEST FIX:
-   * 1) Ensure React keys are unique by using a stable, deterministic renderKey.
-   * 2) Prevent “temp markers” from duplicating existing saved marker ids.
-   * This removes the warning and avoids weird UI identity issues.
-   */
   const savedIds = React.useMemo(() => {
     const s = new Set<string>();
     for (const m of savedMarkers) s.add(String(m.id));
@@ -325,11 +325,8 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
   }, [savedMarkers]);
 
   const combinedMarkers = React.useMemo(() => {
-    // filter temp markers whose id collides with saved marker ids
     const safeTemp = tempMarkers.filter((t) => !savedIds.has(String(t.id)));
 
-    // IMPORTANT: renderKey must be unique even if marker.id duplicates in data
-    // We keep the original marker.id untouched for editing/upsert logic.
     const saved = savedMarkers.map((m) => ({
       ...m,
       saved: true as const,
@@ -442,8 +439,6 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
       setModalOpen(false);
       setModalMarker(null);
       setModalInitialAttachIndex(null);
-
-      // clear temp markers that match saved ids (best-effort cleanup)
       setTempMarkers((prev) => prev.filter((t) => !savedIds.has(String(t.id))));
     },
   });
@@ -499,7 +494,6 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
         ? (crypto as any).randomUUID()
         : `m-${Date.now()}`;
 
-    // If (somehow) a generated id collides, suffix it so it becomes unique.
     const finalId = savedIds.has(String(id)) ? `${id}-${Date.now()}` : id;
 
     const marker = { id: finalId, x, y };
@@ -588,88 +582,163 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
   }
 
   // ============================================================
-  // USER VIEW (readOnly): ONLY windshield + saved markers (X)
+  // USER / RECEIPT VIEW
   // ============================================================
   if (isReadOnly) {
     return (
-      <div
-        ref={mapRef}
-        className="relative rounded-2xl overflow-hidden border border-cyan-200/60 bg-gradient-to-b from-slate-900/70 to-slate-950 shadow-[0_16px_40px_rgba(8,47,73,0.9)]"
-        style={{ aspectRatio: "3 / 1" }}
-      >
-        {/* 9-grid background (NO LABELS) */}
-        <div className="grid grid-cols-3 h-full">
-          {QUADRANTS.map((q, idx) => {
-            const active = activeQuadrants.has(q.id);
-            return (
-              <div
-                key={q.id}
-                className={[
-                  "relative border-slate-700/80 select-none",
-                  idx < 6 ? "border-b" : "",
-                  idx % 3 !== 2 ? "border-r" : "",
-                  active ? "bg-emerald-400/14" : "",
-                ].join(" ")}
-              />
-            );
-          })}
-        </div>
+      <Card className="border border-amber-300/22 bg-[linear-gradient(180deg,rgba(255,224,130,0.08),rgba(58,58,63,0.20)_22%,rgba(30,30,34,0.54)_100%)] backdrop-blur-2xl shadow-[0_24px_70px_rgba(0,0,0,0.36),inset_0_1px_0_rgba(255,255,255,0.06)] print:bg-white print:border-slate-200 print:shadow-none">
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-amber-50 print:text-slate-900">
+            <ScanSearch className="h-5 w-5 text-amber-300" />
+            Windshield Repair Map
+          </CardTitle>
+        </CardHeader>
 
-        {/* glass arc overlay */}
-        <div className="pointer-events-none absolute -top-4 left-1/2 -translate-x-1/2 w-[82%] h-6 rounded-full border border-cyan-200/80 border-b-0 bg-gradient-to-b from-cyan-200/60 via-sky-300/20 to-transparent opacity-80" />
-
-        {/* SAVED markers ONLY (no buttons) */}
-        {savedMarkers.map((m, i) => {
-          const left = `${m.x * 100}%`;
-          const top = `${m.y * 100}%`;
-          // renderKey avoids collisions if savedMarkers has duplicate ids
-          const renderKey = `ro:${String(m.id)}:${m.sourceIndex}:${i}`;
-          return (
+        <CardContent className="space-y-4">
+          <div className="mx-auto max-w-3xl">
             <div
-              key={renderKey}
-              className="absolute -translate-x-1/2 -translate-y-1/2 w-9 h-9 flex items-center justify-center"
-              style={{ left, top }}
+              ref={mapRef}
+              className="relative overflow-hidden rounded-2xl border border-amber-300/18 bg-[linear-gradient(180deg,rgba(255,224,130,0.08),rgba(42,42,46,0.24)_20%,rgba(24,24,27,0.76)_100%)] shadow-[0_16px_40px_rgba(0,0,0,0.36),inset_0_1px_0_rgba(255,255,255,0.05)]"
+              style={{ aspectRatio: "3 / 1" }}
             >
-              <span className="text-2xl text-emerald-300 drop-shadow-[0_0_10px_rgba(16,185,129,0.9)] pointer-events-none select-none">
-                ✕
-              </span>
-              <span className="absolute w-1.5 h-1.5 rounded-full bg-emerald-300/80 -z-10" />
+              {/* 9-grid background */}
+              <div className="grid h-full grid-cols-3">
+                {QUADRANTS.map((q, idx) => {
+                  const active = activeQuadrants.has(q.id);
+                  return (
+                    <div
+                      key={q.id}
+                      className={[
+                        "relative border-white/8 select-none",
+                        idx < 6 ? "border-b" : "",
+                        idx % 3 !== 2 ? "border-r" : "",
+                        active ? "bg-amber-400/10" : "",
+                      ].join(" ")}
+                    />
+                  );
+                })}
+              </div>
+
+              {/* glass arc overlay */}
+              <div className="pointer-events-none absolute -top-4 left-1/2 h-6 w-[82%] -translate-x-1/2 rounded-full border border-amber-200/45 border-b-0 bg-gradient-to-b from-amber-200/35 via-amber-300/10 to-transparent opacity-90" />
+
+              {/* saved markers only */}
+              {savedMarkers.map((m, i) => {
+                const left = `${m.x * 100}%`;
+                const top = `${m.y * 100}%`;
+                const renderKey = `ro:${String(m.id)}:${m.sourceIndex}:${i}`;
+                return (
+                  <div
+                    key={renderKey}
+                    className="absolute flex h-9 w-9 -translate-x-1/2 -translate-y-1/2 items-center justify-center"
+                    style={{ left, top }}
+                  >
+                    <span className="pointer-events-none select-none text-2xl text-amber-300 drop-shadow-[0_0_12px_rgba(251,191,36,0.85)]">
+                      ✕
+                    </span>
+                    <span className="absolute -z-10 h-1.5 w-1.5 rounded-full bg-amber-300/80" />
+                  </div>
+                );
+              })}
             </div>
-          );
-        })}
-      </div>
+          </div>
+
+          {invoice.windshield_repairs_json &&
+          invoice.windshield_repairs_json.length > 0 ? (
+            <div className="grid gap-3">
+              {invoice.windshield_repairs_json.map((r: any, idx: number) => (
+                <div
+                  key={idx}
+                  className="rounded-xl border border-white/10 bg-[rgba(42,42,46,0.42)] p-4 text-sm text-amber-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] print:border-slate-200 print:bg-white print:text-slate-800"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    {r.location && (
+                      <Badge
+                        variant="outline"
+                        className="border-amber-300/35 text-amber-100 text-[10px] print:border-slate-300 print:text-slate-700"
+                      >
+                        {String(r.location)
+                          .toString()
+                          .replace(/_/g, " ")
+                          .toUpperCase()}
+                      </Badge>
+                    )}
+                    {r.quadrant && (
+                      <Badge
+                        variant="outline"
+                        className="border-amber-300/25 text-amber-200 text-[10px] print:border-slate-300 print:text-slate-700"
+                      >
+                        {String(r.quadrant).toUpperCase()}
+                      </Badge>
+                    )}
+                    {r.damage_type && (
+                      <Badge
+                        variant="outline"
+                        className="border-white/12 text-amber-50/80 text-[10px] print:border-slate-300 print:text-slate-700"
+                      >
+                        {String(r.damage_type).toUpperCase()}
+                      </Badge>
+                    )}
+                    {r.crack_length_inches != null && (
+                      <Badge
+                        variant="outline"
+                        className="border-white/12 text-amber-50/80 text-[10px] print:border-slate-300 print:text-slate-700"
+                      >
+                        {r.crack_length_inches}" CRACK
+                      </Badge>
+                    )}
+                  </div>
+
+                  {r.notes && (
+                    <p className="mt-2 text-xs md:text-sm">
+                      <span className="font-semibold text-amber-100 print:text-slate-900">
+                        Repair Notes:
+                      </span>{" "}
+                      {r.notes}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-center text-sm text-amber-50/68 print:text-slate-700">
+              No specific damage locations recorded on this invoice.
+            </p>
+          )}
+        </CardContent>
+      </Card>
     );
   }
 
   // ============================================================
-  // TECH VIEW (editable): ORIGINAL UI
+  // TECH VIEW (editable)
   // ============================================================
   return (
-    <Card className="border border-slate-700/70 bg-slate-900/70 backdrop-blur-xl shadow-[0_22px_70px_rgba(15,23,42,0.9)] print:bg-white print:border-slate-200 print:shadow-none">
+    <Card className="border border-amber-300/18 bg-[linear-gradient(180deg,rgba(255,221,128,0.08),rgba(58,58,63,0.22)_20%,rgba(30,30,34,0.58)_100%)] backdrop-blur-2xl shadow-[0_28px_80px_rgba(0,0,0,0.42),inset_0_1px_0_rgba(255,255,255,0.05)] print:bg-white print:border-slate-200 print:shadow-none">
       <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-slate-50 print:text-slate-900">
-          <ShieldCheck className="w-5 h-5 text-emerald-400" />
+        <CardTitle className="flex items-center gap-2 text-amber-50 print:text-slate-900">
+          <ShieldCheck className="h-5 w-5 text-amber-300" />
           Windshield Repair Map &amp; Details
         </CardTitle>
       </CardHeader>
 
       <CardContent className="space-y-6">
-        <div className="max-w-md mx-auto">
-          <p className="text-xs text-slate-400 mb-2 text-center print:text-slate-600">
+        <div className="mx-auto max-w-md">
+          <p className="mb-2 text-center text-xs text-amber-50/62 print:text-slate-600">
             Click anywhere on the windshield diagram to drop a marker (X)
             specifying the exact spot repaired. Toggle "Mark Damage" and click
             to add. Use the modal to attach to an existing repair or create a
             new repair with metadata.
           </p>
 
-          <div className="flex items-center justify-center gap-2 mb-3 print:hidden">
+          <div className="mb-3 flex items-center justify-center gap-2 print:hidden">
             <Button
               onClick={() => setIsMarking((s) => !s)}
               className={[
-                "text-sm px-3 py-1",
+                "px-3 py-1 text-sm",
                 isMarking
-                  ? "bg-emerald-500/90 text-slate-900"
-                  : "bg-slate-800 text-slate-100",
+                  ? "bg-gradient-to-r from-amber-300 to-yellow-400 text-[#1a1208]"
+                  : "bg-[rgba(44,44,47,0.56)] text-amber-50 hover:bg-[rgba(58,58,63,0.62)]",
               ].join(" ")}
             >
               {isMarking ? "Marking: Click map to add" : "Mark Damage"}
@@ -679,12 +748,12 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
               variant="outline"
               onClick={handleClearTemp}
               disabled={tempMarkers.length === 0}
-              className="text-sm px-3 py-1"
+              className="border-white/10 bg-[rgba(44,44,47,0.50)] text-amber-50 hover:bg-[rgba(58,58,63,0.60)] text-sm px-3 py-1"
             >
               Clear Unsaved
             </Button>
 
-            <div className="ml-3 text-xs text-slate-300">
+            <div className="ml-3 text-xs text-amber-50/72">
               {upsertRepairMutation.isPending && <span>Saving…</span>}
             </div>
           </div>
@@ -698,25 +767,25 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
               if (e.key === "m" || e.key === "M") setIsMarking((s) => !s);
             }}
             className={[
-              "relative rounded-2xl overflow-hidden border border-cyan-200/60 bg-gradient-to-b from-slate-900/70 to-slate-950 shadow-[0_16px_40px_rgba(8,47,73,0.9)]",
-              isMarking ? "cursor-crosshair ring-2 ring-emerald-400/30" : "",
+              "relative overflow-hidden rounded-2xl border border-amber-300/18 bg-[linear-gradient(180deg,rgba(255,224,130,0.08),rgba(42,42,46,0.24)_20%,rgba(24,24,27,0.76)_100%)] shadow-[0_16px_40px_rgba(0,0,0,0.36),inset_0_1px_0_rgba(255,255,255,0.05)]",
+              isMarking ? "cursor-crosshair ring-2 ring-amber-300/30" : "",
             ].join(" ")}
             style={{ aspectRatio: "3 / 1" }}
           >
-            {/* grid with labels (tech mode) */}
-            <div className="grid grid-cols-3 h-full">
+            {/* tech grid with labels */}
+            <div className="grid h-full grid-cols-3">
               {QUADRANTS.map((q, idx) => {
                 const active = activeQuadrants.has(q.id);
                 return (
                   <div
                     key={q.id}
                     className={[
-                      "relative flex items-center justify-center text-[11px] font-medium border-slate-700/80",
+                      "relative flex items-center justify-center border-white/8 text-[11px] font-medium",
                       idx < 6 ? "border-b" : "",
                       idx % 3 !== 2 ? "border-r" : "",
                       active
-                        ? "bg-emerald-400/20 text-emerald-100"
-                        : "text-slate-400",
+                        ? "bg-amber-400/14 text-amber-100"
+                        : "text-amber-50/52",
                     ].join(" ")}
                   >
                     <span className="relative z-10 opacity-90">{q.label}</span>
@@ -725,7 +794,7 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
               })}
             </div>
 
-            <div className="pointer-events-none absolute -top-4 left-1/2 -translate-x-1/2 w-[82%] h-6 rounded-full border border-cyan-200/80 border-b-0 bg-gradient-to-b from-cyan-200/60 via-sky-300/20 to-transparent opacity-80" />
+            <div className="pointer-events-none absolute -top-4 left-1/2 h-6 w-[82%] -translate-x-1/2 rounded-full border border-amber-200/45 border-b-0 bg-gradient-to-b from-amber-200/35 via-amber-300/10 to-transparent opacity-90" />
 
             {/* saved markers */}
             {combinedMarkers
@@ -744,13 +813,13 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
                       )
                     }
                     title="Saved marker — click to edit"
-                    className="absolute -translate-x-1/2 -translate-y-1/2 w-9 h-9 flex items-center justify-center"
+                    className="absolute flex h-9 w-9 -translate-x-1/2 -translate-y-1/2 items-center justify-center"
                     style={{ left, top }}
                   >
-                    <span className="text-2xl text-emerald-300 drop-shadow-[0_0_8px_rgba(16,185,129,0.85)] pointer-events-none select-none">
+                    <span className="pointer-events-none select-none text-2xl text-amber-300 drop-shadow-[0_0_10px_rgba(251,191,36,0.85)]">
                       ✕
                     </span>
-                    <span className="absolute w-1.5 h-1.5 rounded-full bg-emerald-300/80 -z-10" />
+                    <span className="absolute -z-10 h-1.5 w-1.5 rounded-full bg-amber-300/80" />
                   </button>
                 );
               })}
@@ -770,15 +839,15 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
                       handleMarkerClick({ id: m.id, saved: false }, e)
                     }
                     title="Temp marker — click to edit"
-                    className="absolute -translate-x-1/2 -translate-y-1/2 w-9 h-9 flex items-center justify-center"
+                    className="absolute flex h-9 w-9 -translate-x-1/2 -translate-y-1/2 items-center justify-center"
                     style={{ left, top }}
                   >
                     <span
                       className={[
-                        "text-2xl font-black pointer-events-none select-none",
+                        "pointer-events-none select-none text-2xl font-black",
                         isSelected
-                          ? "text-amber-300 drop-shadow-[0_0_12px_rgba(250,204,21,0.85)]"
-                          : "text-emerald-200 drop-shadow-[0_0_8px_rgba(16,185,129,0.85)]",
+                          ? "text-yellow-200 drop-shadow-[0_0_12px_rgba(250,204,21,0.85)]"
+                          : "text-amber-200 drop-shadow-[0_0_8px_rgba(251,191,36,0.85)]",
                       ].join(" ")}
                     >
                       ✕
@@ -789,20 +858,20 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
           </div>
         </div>
 
-        {/* details list (tech only) */}
+        {/* details list */}
         {invoice.windshield_repairs_json &&
         invoice.windshield_repairs_json.length > 0 ? (
           <div className="grid gap-3">
             {invoice.windshield_repairs_json.map((r: any, idx: number) => (
               <div
                 key={idx}
-                className="p-4 rounded-xl border border-slate-700/80 bg-slate-950/70 text-sm text-slate-100 shadow-md shadow-slate-950/60 print:bg-white print:border-slate-200 print:text-slate-800 print:shadow-none"
+                className="rounded-xl border border-white/10 bg-[rgba(42,42,46,0.42)] p-4 text-sm text-amber-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] print:border-slate-200 print:bg-white print:text-slate-800"
               >
                 <div className="flex flex-wrap items-center gap-2">
                   {r.location && (
                     <Badge
                       variant="outline"
-                      className="border-cyan-300/70 text-cyan-200 text-[10px]"
+                      className="border-amber-300/35 text-amber-100 text-[10px] print:border-slate-300 print:text-slate-700"
                     >
                       {String(r.location)
                         .toString()
@@ -813,7 +882,7 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
                   {r.quadrant && (
                     <Badge
                       variant="outline"
-                      className="border-emerald-300/70 text-emerald-200 text-[10px]"
+                      className="border-amber-300/25 text-amber-200 text-[10px] print:border-slate-300 print:text-slate-700"
                     >
                       {String(r.quadrant).toUpperCase()}
                     </Badge>
@@ -821,7 +890,7 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
                   {r.damage_type && (
                     <Badge
                       variant="outline"
-                      className="border-slate-500/80 text-slate-200 text-[10px]"
+                      className="border-white/12 text-amber-50/80 text-[10px] print:border-slate-300 print:text-slate-700"
                     >
                       {String(r.damage_type).toUpperCase()}
                     </Badge>
@@ -830,7 +899,10 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
 
                 {r.notes && (
                   <p className="mt-2 text-xs md:text-sm">
-                    <span className="font-semibold">Tech Notes:</span> {r.notes}
+                    <span className="font-semibold text-amber-100 print:text-slate-900">
+                      Tech Notes:
+                    </span>{" "}
+                    {r.notes}
                   </p>
                 )}
 
@@ -849,7 +921,7 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
                       setModalInitialAttachIndex(idx);
                       setModalOpen(true);
                     }}
-                    className="text-xs px-2 py-1"
+                    className="border-white/10 bg-[rgba(44,44,47,0.50)] px-2 py-1 text-xs text-amber-50 hover:bg-[rgba(58,58,63,0.60)]"
                   >
                     Edit
                   </Button>
@@ -866,7 +938,7 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
                           removeRepairMutation.mutate(idx);
                         }
                       }}
-                      className="text-xs px-2 py-1"
+                      className="border-white/10 bg-[rgba(44,44,47,0.50)] px-2 py-1 text-xs text-amber-50 hover:bg-[rgba(58,58,63,0.60)]"
                     >
                       Remove Marker
                     </Button>
@@ -876,7 +948,7 @@ export const WindshieldRepairMap: React.FC<WindshieldRepairMapProps> = ({
             ))}
           </div>
         ) : (
-          <p className="text-slate-400 text-sm text-center print:text-slate-700">
+          <p className="text-center text-sm text-amber-50/68 print:text-slate-700">
             No specific damage locations recorded on this invoice.
           </p>
         )}

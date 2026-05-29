@@ -1,0 +1,13 @@
+FROM mcr.microsoft.com/playwright:v1.60.0-noble
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV SAFELITE_HEADLESS=true
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+CMD ["npm", "run", "safelite:worker"]

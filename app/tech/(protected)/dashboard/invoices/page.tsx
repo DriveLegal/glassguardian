@@ -53,6 +53,11 @@ type TechInvoiceRow = {
   discount_cents: number | null;
   tax_cents: number | null;
   total_cents: number | null;
+
+  // ✅ NEW: payer split columns (from tech_invoices table)
+  insurance_due_cents?: number | null;
+  customer_due_cents?: number | null;
+
   created_at: string | null;
 };
 
@@ -159,6 +164,21 @@ function shineClass(enabled: boolean) {
     : "";
 }
 
+/**
+ * ✅ Display total owed that makes sense with insurance:
+ * - If insurance_due_cents > 0, show INSURANCE DUE (not customer total).
+ * - Else show customer total_cents.
+ */
+function displayTotalCents(inv: TechInvoiceRow): number {
+  const insurance = inv.insurance_due_cents ?? 0;
+  if (insurance > 0) return insurance;
+  return inv.total_cents ?? 0;
+}
+
+function isInsuranceMode(inv: TechInvoiceRow): boolean {
+  return (inv.insurance_due_cents ?? 0) > 0;
+}
+
 /* ---------- Main Page ---------- */
 
 export default function TechDashboardInvoicesPage() {
@@ -182,9 +202,7 @@ export default function TechDashboardInvoicesPage() {
       setTechEmail(email);
       if (!email) {
         router.replace(
-          `/tech/login?redirect=${encodeURIComponent(
-            "/tech/dashboard/invoices"
-          )}`
+          `/tech/login?redirect=${encodeURIComponent("/tech/dashboard/invoices")}`
         );
       }
     })();
@@ -231,11 +249,16 @@ export default function TechDashboardInvoicesPage() {
             "discount_cents",
             "tax_cents",
             "total_cents",
+            // ✅ NEW
+            "insurance_due_cents",
+            "customer_due_cents",
             "created_at",
           ].join(",")
         )
         .eq("technician_email", techEmail as string)
-        .order("invoice_date", { ascending: false });
+        // show most recent first (fallback to created_at if invoice_date null)
+        .order("invoice_date", { ascending: false, nullsFirst: false })
+        .order("created_at", { ascending: false });
 
       if (error) throw error;
       return (data ?? []) as unknown as TechInvoiceRow[];
@@ -243,7 +266,7 @@ export default function TechDashboardInvoicesPage() {
     staleTime: 15_000,
   });
 
-  /* ------ Derived summaries ------ */
+  /* ------ Derived summaries (use displayTotalCents for totals) ------ */
 
   const totals = React.useMemo(() => {
     const paid = invoices.filter((inv) => normalizeStatus(inv.status) === "paid");
@@ -256,7 +279,7 @@ export default function TechDashboardInvoicesPage() {
     const denied = invoices.filter((inv) => normalizeStatus(inv.status) === "denied");
 
     const sum = (rows: TechInvoiceRow[]) =>
-      rows.reduce((acc, inv) => acc + (inv.total_cents ?? 0), 0);
+      rows.reduce((acc, inv) => acc + displayTotalCents(inv), 0);
 
     return {
       countAll: invoices.length,
@@ -290,6 +313,9 @@ export default function TechDashboardInvoicesPage() {
         appt.service_type ?? "",
         appt.damage_description ?? "",
         inv.service_address ?? "",
+        // payer hints
+        String(inv.insurance_due_cents ?? ""),
+        String(inv.customer_due_cents ?? ""),
       ];
 
       return fields.some((f) => String(f).toLowerCase().includes(term));
@@ -304,9 +330,7 @@ export default function TechDashboardInvoicesPage() {
       : "bg-slate-900/80 text-slate-300 border-slate-700 hover:border-cyan-400/70 hover:text-cyan-100";
 
   const avgTicket =
-    totals.countAll > 0
-      ? ((totals.sumPaid + totals.sumOpen) / totals.countAll / 100).toFixed(2)
-      : "0.00";
+    totals.countAll > 0 ? ((totals.sumPaid + totals.sumOpen) / totals.countAll / 100).toFixed(2) : "0.00";
 
   /* ---------- RENDER ---------- */
 
@@ -364,9 +388,7 @@ export default function TechDashboardInvoicesPage() {
               </p>
 
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="text-2xl md:text-3xl font-extrabold text-slate-50">
-                  Invoices
-                </h1>
+                <h1 className="text-2xl md:text-3xl font-extrabold text-slate-50">Invoices</h1>
                 <Sparkles className="w-4 h-4 text-cyan-300" />
 
                 <Badge className="border border-slate-700 bg-slate-950/50 text-slate-200 backdrop-blur-sm">
@@ -431,9 +453,7 @@ export default function TechDashboardInvoicesPage() {
                 <p className="text-[0.65rem] uppercase tracking-[0.22em] text-slate-400">
                   Total Invoices
                 </p>
-                <p className="mt-1 text-2xl font-bold text-slate-50">
-                  {totals.countAll}
-                </p>
+                <p className="mt-1 text-2xl font-bold text-slate-50">{totals.countAll}</p>
               </div>
               <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-slate-500 to-slate-300 flex items-center justify-center shadow-lg shadow-slate-900/80">
                 <FileText className="w-5 h-5 text-slate-950" />
@@ -511,9 +531,7 @@ export default function TechDashboardInvoicesPage() {
             </div>
 
             <div className="flex items-center gap-2 flex-wrap justify-end">
-              {(
-                ["all", "draft", "sent", "paid", "overdue", "denied"] as const
-              ).map((s) => (
+              {(["all", "draft", "sent", "paid", "overdue", "denied"] as const).map((s) => (
                 <button
                   key={s}
                   onClick={() => setStatusFilter(s)}
@@ -537,9 +555,7 @@ export default function TechDashboardInvoicesPage() {
                 <div className="absolute inset-0 rounded-full blur-2xl opacity-60 bg-cyan-500/18 animate-pulse" />
                 <div className="relative h-10 w-10 rounded-full border-2 border-cyan-400/60 border-t-transparent animate-spin" />
               </div>
-              <p className="text-xs tracking-[0.25em] uppercase text-slate-400">
-                Loading invoices
-              </p>
+              <p className="text-xs tracking-[0.25em] uppercase text-slate-400">Loading invoices</p>
             </CardContent>
           </Card>
         )}
@@ -554,8 +570,7 @@ export default function TechDashboardInvoicesPage() {
             </CardHeader>
             <CardContent>
               <p className="text-sm text-red-100/90">
-                {(error as any)?.message ??
-                  "Something went wrong fetching invoices from Supabase."}
+                {(error as any)?.message ?? "Something went wrong fetching invoices from Supabase."}
               </p>
             </CardContent>
           </Card>
@@ -565,12 +580,10 @@ export default function TechDashboardInvoicesPage() {
           <Card className="border border-slate-700/80 bg-slate-900/70 backdrop-blur-2xl shadow-[0_22px_70px_rgba(15,23,42,0.9)]">
             <CardContent className="py-10 flex flex-col items-center gap-3 text-center">
               <FileText className="w-9 h-9 text-slate-400 mb-1" />
-              <p className="text-slate-100 font-semibold">
-                No invoices match your filters
-              </p>
+              <p className="text-slate-100 font-semibold">No invoices match your filters</p>
               <p className="text-xs text-slate-400 max-w-sm">
-                Try clearing the search or changing the status filter. You can
-                create a new invoice from the top-right button.
+                Try clearing the search or changing the status filter. You can create a new invoice
+                from the top-right button.
               </p>
             </CardContent>
           </Card>
@@ -603,11 +616,13 @@ export default function TechDashboardInvoicesPage() {
 
               <div className="divide-y divide-slate-800/80">
                 {filteredInvoices.map((inv) => {
-                  const total = centsToDollars(inv.total_cents);
-                  const dateLabel = inv.invoice_date ?? inv.created_at ?? null;
                   const appt = inv.appointment_snapshot ?? {};
+                  const dateLabel = inv.invoice_date ?? inv.created_at ?? null;
 
-                  // ✅ FIX: Always route by invoice id (invoice detail should be viewable immediately)
+                  // ✅ show insurance due when applicable
+                  const totalDisplayCents = displayTotalCents(inv);
+                  const total = centsToDollars(totalDisplayCents);
+
                   const invoiceDetailId = inv.id;
                   const canView = !!invoiceDetailId;
 
@@ -618,22 +633,27 @@ export default function TechDashboardInvoicesPage() {
                   const meta = statusMeta(inv.status);
                   const StatusIcon = meta.icon;
 
+                  const insuranceMode = isInsuranceMode(inv);
+                  const customerDueCents =
+                    typeof inv.customer_due_cents === "number"
+                      ? inv.customer_due_cents
+                      : insuranceMode
+                        ? 0
+                        : (inv.total_cents ?? 0);
+
                   return (
                     <motion.div
                       key={inv.id}
                       initial={{ opacity: 0, y: 6 }}
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ duration: 0.18 }}
-                      className={cx(
-                        "px-4 md:px-5 py-4 transition-colors",
-                        "hover:bg-slate-950/25"
-                      )}
+                      className={cx("px-4 md:px-5 py-4 transition-colors", "hover:bg-slate-950/25")}
                     >
                       {/* Desktop row */}
                       <div className="hidden md:grid grid-cols-[1.25fr_1.6fr_0.95fr_0.85fr_0.8fr_0.72fr] gap-3 items-center">
                         {/* Invoice meta */}
                         <div className="flex flex-col gap-1">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-sm font-semibold text-slate-50">
                               #{inv.invoice_number ?? "—"}
                             </span>
@@ -648,6 +668,13 @@ export default function TechDashboardInvoicesPage() {
                             {appt?.replacement_required && (
                               <Badge className="bg-amber-500/15 text-amber-200 border-amber-400/60 text-[10px]">
                                 CRACK-OUT
+                              </Badge>
+                            )}
+
+                            {insuranceMode && (
+                              <Badge className="bg-sky-500/18 text-sky-100 border-sky-300/60 text-[10px]">
+                                <ShieldCheck className="w-3 h-3 mr-1" />
+                                INSURANCE · CUST ${centsToDollars(customerDueCents)}
                               </Badge>
                             )}
                           </div>
@@ -694,9 +721,7 @@ export default function TechDashboardInvoicesPage() {
                           )}
 
                           {address && (
-                            <p className="text-[11px] text-slate-400 line-clamp-1">
-                              {address}
-                            </p>
+                            <p className="text-[11px] text-slate-400 line-clamp-1">{address}</p>
                           )}
                         </div>
 
@@ -706,12 +731,13 @@ export default function TechDashboardInvoicesPage() {
                           <span>{formatDate(dateLabel)}</span>
                         </div>
 
-                        {/* Total */}
+                        {/* Total (shows insurance due when applicable) */}
                         <div className="flex items-center gap-2 text-xs">
                           <DollarSign className="w-4 h-4 text-emerald-300" />
-                          <span className="font-semibold text-emerald-100">
-                            ${total}
-                          </span>
+                          <span className="font-semibold text-emerald-100">${total}</span>
+                          {insuranceMode && (
+                            <span className="text-[10px] text-sky-200/90">(insurance)</span>
+                          )}
                         </div>
 
                         {/* Status */}
@@ -735,9 +761,7 @@ export default function TechDashboardInvoicesPage() {
                               size="sm"
                               variant="outline"
                               onClick={() =>
-                                router.push(
-                                  `/tech/dashboard/invoices/invoice/${invoiceDetailId}`
-                                )
+                                router.push(`/tech/dashboard/invoices/invoice/${invoiceDetailId}`)
                               }
                               className={cx(
                                 "border-slate-700 bg-slate-950/20 hover:bg-slate-900/40 text-slate-100 hover:text-slate-50 shadow-none flex items-center gap-1 transition-all",
@@ -768,9 +792,7 @@ export default function TechDashboardInvoicesPage() {
                             <p className="text-sm font-semibold text-slate-50">
                               #{inv.invoice_number ?? "—"}
                             </p>
-                            <p className="text-[11px] text-slate-400">
-                              {formatDate(dateLabel)}
-                            </p>
+                            <p className="text-[11px] text-slate-400">{formatDate(dateLabel)}</p>
 
                             <div className="mt-1 flex flex-wrap gap-1.5">
                               {appt.service_type && (
@@ -782,6 +804,12 @@ export default function TechDashboardInvoicesPage() {
                               {appt?.replacement_required && (
                                 <Badge className="bg-amber-500/15 text-amber-200 border-amber-400/60 text-[10px]">
                                   CRACK-OUT
+                                </Badge>
+                              )}
+                              {insuranceMode && (
+                                <Badge className="bg-sky-500/18 text-sky-100 border-sky-300/60 text-[10px]">
+                                  <ShieldCheck className="w-3 h-3 mr-1" />
+                                  INSURANCE
                                 </Badge>
                               )}
                             </div>
@@ -799,9 +827,7 @@ export default function TechDashboardInvoicesPage() {
                         </div>
 
                         <div className="text-xs text-slate-200">
-                          <p className="font-medium">
-                            {email || name || "No customer email"}
-                          </p>
+                          <p className="font-medium">{email || name || "No customer email"}</p>
                           {appt.damage_description && (
                             <p className="text-[11px] text-slate-400 line-clamp-2 mt-0.5">
                               {appt.damage_description}
@@ -818,6 +844,9 @@ export default function TechDashboardInvoicesPage() {
                           <div className="flex items-center gap-1 text-xs text-emerald-100">
                             <DollarSign className="w-3 h-3 text-emerald-300" />
                             <span className="font-semibold">${total}</span>
+                            {insuranceMode && (
+                              <span className="text-[10px] text-sky-200/90 ml-1">(insurance)</span>
+                            )}
                           </div>
 
                           <div className="flex items-center gap-2">
@@ -837,10 +866,7 @@ export default function TechDashboardInvoicesPage() {
                                 size="sm"
                                 variant="outline"
                                 onClick={() =>
-                                  window.open(
-                                    `tel:${customer_email_to_phone_appt(appt)}`,
-                                    "_self"
-                                  )
+                                  window.open(`tel:${customer_email_to_phone_appt(appt)}`, "_self")
                                 }
                                 className="border-slate-700 bg-slate-950/20 text-slate-100 hover:bg-slate-900/50 h-8 px-3"
                               >
@@ -864,9 +890,7 @@ export default function TechDashboardInvoicesPage() {
                                 size="sm"
                                 variant="outline"
                                 onClick={() =>
-                                  router.push(
-                                    `/tech/dashboard/invoices/invoice/${invoiceDetailId}`
-                                  )
+                                  router.push(`/tech/dashboard/invoices/invoice/${invoiceDetailId}`)
                                 }
                                 className="border-slate-700 bg-slate-950/20 text-slate-100 hover:bg-slate-900/50 flex items-center gap-1 h-8 px-3"
                               >
@@ -874,9 +898,7 @@ export default function TechDashboardInvoicesPage() {
                                 <ArrowRight className="w-3 h-3" />
                               </Button>
                             ) : (
-                              <span className="text-[10px] text-slate-500">
-                                Detail view coming soon
-                              </span>
+                              <span className="text-[10px] text-slate-500">Detail view coming soon</span>
                             )}
                           </div>
                         </div>

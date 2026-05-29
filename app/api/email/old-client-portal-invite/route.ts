@@ -1,3 +1,4 @@
+//app/api/email/old-client-portal-invite/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { Resend } from "resend";
 import { createClient } from "@supabase/supabase-js";
@@ -737,8 +738,7 @@ If you didn’t expect this email, you can safely ignore it.`;
                 <div class="code">${createPasswordUrl}</div>
 
                 <p class="p">
-                  If you ever need anything — questions, concerns, or a quick recommendation —
-                  call/text us at <strong>(909) 529-1798</strong>.
+                 Please feel free to visit the home page for more information: <strong>glassguardianchipandcrackrepair.com</strong>.
                 </p>
               </div>
 

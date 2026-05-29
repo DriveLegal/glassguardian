@@ -14,15 +14,6 @@ function normalizeEmail(v: any) {
   return String(v ?? "").trim().toLowerCase();
 }
 
-function dataUrlToBytes(dataUrl: string) {
-  const m = dataUrl.match(/^data:(.+?);base64,(.+)$/);
-  if (!m) throw new Error("Invalid signature data URL");
-  const contentType = m[1] || "image/png";
-  const b64 = m[2] || "";
-  const bytes = Buffer.from(b64, "base64");
-  return { bytes, contentType };
-}
-
 function getBearerToken(req: NextRequest) {
   const h = req.headers.get("authorization") || "";
   const m = h.match(/^Bearer\s+(.+)$/i);
@@ -37,6 +28,48 @@ async function getIpUa() {
     null;
   const ua = h.get("user-agent") || null;
   return { ip, ua };
+}
+
+/**
+ * Ensure a matching row exists in `clients` for this email and return its id.
+ * tech_invoices.client_id -> clients.id
+ */
+async function ensureClientIdByEmail(
+  admin: SupabaseClient,
+  emailRaw: any,
+  fullName?: string | null,
+  phone?: string | null
+): Promise<string | null> {
+  const email = normalizeEmail(emailRaw);
+  if (!email) return null;
+
+  const { data: existing, error: selErr } = await admin
+    .from("clients")
+    .select("id,email")
+    .eq("email", email)
+    .maybeSingle();
+
+  if (!selErr && existing?.id) return existing.id as string;
+
+  const { data: up, error: upErr } = await admin
+    .from("clients")
+    .upsert(
+      {
+        email,
+        ...(fullName ? { full_name: fullName } : {}),
+        ...(phone ? { phone } : {}),
+      },
+      { onConflict: "email" }
+    )
+    .select("id,email")
+    .maybeSingle();
+
+  if (upErr) {
+    console.warn("ensureClientIdByEmail upsert error:", upErr.message);
+    return null;
+  }
+
+  return (up?.id as string) || null;
 }
 
 export async function POST(
@@ -62,7 +95,6 @@ export async function POST(
       return NextResponse.json({ error: "Missing bearer token." }, { status: 401 });
     }
 
-    // ✅ Validate caller via anon+token
     const authed = createClient(supabaseUrl, anonKey, {
       auth: { persistSession: false, autoRefreshToken: false },
       global: { headers: { Authorization: `Bearer ${token}` } },
@@ -75,17 +107,16 @@ export async function POST(
 
     const authedEmail = normalizeEmail(authData.user.email);
 
-    // ✅ Service role admin client (bypasses RLS)
     const admin: SupabaseClient = createClient(supabaseUrl, serviceKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
-    // ✅ Pull appointment fields needed for invoice snapshot
     const { data: appt, error: apptErr } = await admin
       .from("appointments")
       .select(
         [
           "id",
+          "status",
           "technician_email",
           "customer_email",
           "vehicle_id",
@@ -103,6 +134,12 @@ export async function POST(
           "final_amount",
           "created_at",
           "warranty_id",
+          "customer_signature",
+          "repair_outcome",
+          "crack_out_occurred",
+          "crack_out_cause",
+          "crack_out_notes",
+          "crack_out_photo_url",
         ].join(",")
       )
       .eq("id", appointmentId)
@@ -117,7 +154,6 @@ export async function POST(
 
     const appointment = appt as any;
 
-    // ✅ Enforce assignment only when technician_email exists
     const assignedEmail = normalizeEmail(appointment.technician_email);
     if (assignedEmail && authedEmail && assignedEmail !== authedEmail) {
       return NextResponse.json({ error: "Forbidden." }, { status: 403 });
@@ -125,22 +161,16 @@ export async function POST(
 
     const body = await req.json().catch(() => null);
 
-    const signatureDataUrl = String(body?.signature_data_url ?? "");
-    if (!signatureDataUrl.startsWith("data:image/")) {
-      return NextResponse.json(
-        { error: "signature_data_url must be a data:image/* base64 URL" },
-        { status: 400 }
-      );
-    }
-
-    // crack-out validation
     const repair_outcome =
       body?.repair_outcome === "crack_out" ? "crack_out" : "completed";
-    const crack_out_occurred = !!body?.crack_out_occurred;
+    const crack_out_occurred =
+      repair_outcome === "crack_out" || !!body?.crack_out_occurred;
 
     const crack_out_cause = crack_out_occurred ? body?.crack_out_cause ?? null : null;
     const crack_out_notes = crack_out_occurred ? body?.crack_out_notes ?? null : null;
-    const crack_out_photo_url = crack_out_occurred ? body?.crack_out_photo_url ?? null : null;
+    const crack_out_photo_url = crack_out_occurred
+      ? body?.crack_out_photo_url ?? null
+      : null;
 
     if (crack_out_occurred) {
       if (!crack_out_cause) {
@@ -149,12 +179,14 @@ export async function POST(
           { status: 400 }
         );
       }
+
       if (!crack_out_notes || String(crack_out_notes).trim().length < 10) {
         return NextResponse.json(
           { error: "Crack-out notes (min 10 chars) are required." },
           { status: 400 }
         );
       }
+
       if (!crack_out_photo_url) {
         return NextResponse.json(
           { error: "Crack-out photo is required." },
@@ -163,31 +195,8 @@ export async function POST(
       }
     }
 
-    // ✅ Upload signature
-    const { bytes, contentType } = dataUrlToBytes(signatureDataUrl);
-    if (bytes.length > 1_500_000) {
-      return NextResponse.json(
-        { error: "Signature image too large. Please try again." },
-        { status: 413 }
-      );
-    }
-
-    const techSigPath = `appointments/${appointmentId}/tech-signature-${Date.now()}.png`;
-
-    const up = await admin.storage.from("waivers").upload(techSigPath, bytes, {
-      contentType,
-      upsert: true,
-      cacheControl: "3600",
-    });
-
-    if (up.error) {
-      return NextResponse.json({ error: up.error.message }, { status: 400 });
-    }
-
-    // best-effort ip/ua (not stored)
     await getIpUa().catch(() => null);
 
-    // ✅ Update appointment
     const updates: Record<string, any> = {
       status: "completed",
       actual_end_time: String(body?.actual_end_time ?? nowIso()),
@@ -208,8 +217,14 @@ export async function POST(
         : null,
       replacement_required: crack_out_occurred,
 
-      // You said you're using this column for signature path
-      customer_signature: techSigPath,
+      // keep workflow fields if provided by the new flow
+      tech_workflow_step:
+        typeof body?.tech_workflow_step === "number"
+          ? body.tech_workflow_step
+          : null,
+      tech_workflow_updated_at: String(
+        body?.tech_workflow_updated_at ?? nowIso()
+      ),
     };
 
     const { error: updateErr } = await admin
@@ -218,30 +233,31 @@ export async function POST(
       .eq("id", appointmentId);
 
     if (updateErr) {
-      await admin.storage.from("waivers").remove([techSigPath]).catch(() => {});
       return NextResponse.json({ error: updateErr.message }, { status: 400 });
     }
 
-    /* ----------------------------------------------------------------
-       ✅ BEST: invoice upsert by appointment_id (requires unique constraint)
-    ---------------------------------------------------------------- */
-
-    // Pull customer name + client_id (best effort)
     let customer_name: string | null = null;
-    let client_id: string | null = null;
+    let customer_phone: string | null = null;
 
     if (appointment.customer_email) {
       const { data: u, error: uErr } = await admin
         .from("app_users")
-        .select("id, full_name")
+        .select("full_name, phone")
         .eq("email", appointment.customer_email)
         .maybeSingle();
 
       if (!uErr && u) {
         customer_name = (u as any)?.full_name ?? null;
-        client_id = (u as any)?.id ?? null;
+        customer_phone = (u as any)?.phone ?? null;
       }
     }
+
+    const client_id = await ensureClientIdByEmail(
+      admin,
+      appointment.customer_email,
+      customer_name,
+      customer_phone
+    );
 
     const snapshot = {
       id: appointment.id,
@@ -261,6 +277,9 @@ export async function POST(
       final_amount: appointment.final_amount,
       created_at: appointment.created_at,
       warranty_id: appointment.warranty_id,
+
+      // keep existing waiver/user signature reference in the snapshot
+      customer_signature: appointment.customer_signature ?? null,
     };
 
     const invoicePayload: Record<string, any> = {
@@ -268,7 +287,7 @@ export async function POST(
       appointment_id: appointmentId,
 
       technician_email: appointment.technician_email ?? authedEmail ?? null,
-      client_id, // ✅ best-effort
+      client_id: client_id ?? null,
       vehicle_id: appointment.vehicle_id ?? null,
 
       customer_email: appointment.customer_email ?? null,
@@ -277,7 +296,7 @@ export async function POST(
 
       appointment_snapshot: snapshot,
 
-      invoice_date: todayIsoDate(), // ✅ NOT NULL
+      invoice_date: todayIsoDate(),
       status: "draft",
 
       services_json: null,
@@ -301,7 +320,6 @@ export async function POST(
       replacement_status: crack_out_occurred ? "required" : null,
     };
 
-    // ✅ Upsert (best) — requires unique constraint on appointment_id
     const { data: upInv, error: upInvErr } = await admin
       .from("tech_invoices")
       .upsert(invoicePayload, { onConflict: "appointment_id" })
@@ -309,7 +327,14 @@ export async function POST(
       .maybeSingle();
 
     if (upInvErr) {
-      return NextResponse.json({ error: upInvErr.message }, { status: 400 });
+      return NextResponse.json(
+        {
+          error:
+            upInvErr.message ||
+            "Invoice upsert failed. Ensure tech_invoices has a UNIQUE constraint on appointment_id.",
+        },
+        { status: 400 }
+      );
     }
 
     const invoiceId = upInv?.id ?? null;
@@ -322,7 +347,11 @@ export async function POST(
     }
 
     return NextResponse.json(
-      { ok: true, signature_path: techSigPath, invoice_id: invoiceId },
+      {
+        ok: true,
+        invoice_id: invoiceId,
+        client_id,
+      },
       { status: 200 }
     );
   } catch (e: any) {

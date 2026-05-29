@@ -194,6 +194,73 @@ type AppUser = {
   full_name: string | null;
 };
 
+type AnyObj = Record<string, any>;
+
+/* -------- Vehicle helpers (flexible schema safe) -------- */
+
+type VehicleAny = AnyObj & { id?: string };
+
+function normalizeEmail(email: string) {
+  return (email || "").trim().toLowerCase();
+}
+
+function isValidEmailish(email: string) {
+  const e = normalizeEmail(email);
+  return e.includes("@") && e.includes(".") && e.length >= 6;
+}
+
+function pickFirst<T = any>(obj: AnyObj, keys: string[], fallback: any = ""): T {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (v !== null && v !== undefined && String(v).trim() !== "") return v as T;
+  }
+  return fallback as T;
+}
+
+function vehicleToLabel(v: VehicleAny): string {
+  const year = String(pickFirst(v, ["year", "vehicle_year"], "") || "").trim();
+  const make = String(pickFirst(v, ["make", "vehicle_make"], "") || "").trim();
+  const model = String(pickFirst(v, ["model", "vehicle_model"], "") || "").trim();
+  const plate = String(
+    pickFirst(v, ["plate", "license_plate", "vehicle_plate"], "") || ""
+  )
+    .trim()
+    .toUpperCase();
+
+  const bits = [year, make, model].filter(Boolean).join(" ");
+  if (bits && plate) return `${bits} · ${plate}`;
+  if (bits) return bits;
+  if (plate) return `Plate · ${plate}`;
+  return "Vehicle";
+}
+
+function vehicleToFormFields(v: VehicleAny) {
+  const yearRaw = pickFirst<any>(v, ["year", "vehicle_year"], "");
+  const year =
+    yearRaw === null || yearRaw === undefined || yearRaw === ""
+      ? ""
+      : String(yearRaw);
+
+  const make = String(pickFirst(v, ["make", "vehicle_make"], "") || "");
+  const model = String(pickFirst(v, ["model", "vehicle_model"], "") || "");
+
+  const plate = String(
+    pickFirst(v, ["plate", "license_plate", "vehicle_plate"], "") || ""
+  ).toUpperCase();
+
+  return {
+    vehicle_year: year,
+    vehicle_make: make,
+    vehicle_model: model,
+    vehicle_plate: plate,
+  };
+}
+
+function looksLikeMissingColumnError(msg: string, col: string) {
+  const m = (msg || "").toLowerCase();
+  return m.includes("column") && m.includes(col.toLowerCase()) && m.includes("does not exist");
+}
+
 /* -------------------- Main Page -------------------- */
 
 export default function AdminNewWarrantyPage() {
@@ -238,6 +305,139 @@ export default function AdminNewWarrantyPage() {
   const [selectedAppUserId, setSelectedAppUserId] = React.useState<string>("");
   const [customerSearch, setCustomerSearch] = React.useState<string>("");
 
+  /* ---------- Vehicles dropdown for selected customer ---------- */
+
+  const [vehicles, setVehicles] = React.useState<VehicleAny[]>([]);
+  const [vehiclesLoading, setVehiclesLoading] = React.useState<boolean>(false);
+  const [vehiclesError, setVehiclesError] = React.useState<string | null>(null);
+  const [selectedVehicleId, setSelectedVehicleId] = React.useState<string>("");
+  const lastVehiclesEmailRef = React.useRef<string>("");
+
+  async function runVehicleQuery(col: string, normalizedEmail: string) {
+    // First try with ordering by created_at (nice to have)
+    let q = supabaseClient.from("vehicles").select("*").eq(col, normalizedEmail);
+
+    const { data: d1, error: e1 } = await q.order("created_at", { ascending: false });
+    if (!e1) return { data: d1 ?? [], error: null };
+
+    // If vehicles table doesn't have created_at, retry WITHOUT order (common!)
+    if (looksLikeMissingColumnError(e1.message || "", "created_at")) {
+      const { data: d2, error: e2 } = await supabaseClient
+        .from("vehicles")
+        .select("*")
+        .eq(col, normalizedEmail);
+
+      if (!e2) return { data: d2 ?? [], error: null };
+      return { data: null, error: e2 };
+    }
+
+    return { data: null, error: e1 };
+  }
+
+  async function fetchVehiclesForEmail(email: string) {
+    const normalized = normalizeEmail(email);
+
+    if (!isValidEmailish(normalized)) {
+      setVehicles([]);
+      setSelectedVehicleId("");
+      setVehiclesError(null);
+      setVehiclesLoading(false);
+      lastVehiclesEmailRef.current = "";
+      return;
+    }
+
+    // prevent redundant fetches
+    if (lastVehiclesEmailRef.current === normalized) return;
+    lastVehiclesEmailRef.current = normalized;
+
+    setVehiclesLoading(true);
+    setVehiclesError(null);
+
+    try {
+      const tryColumns = ["customer_email", "owner_email", "email", "user_email"];
+
+      let data: any[] | null = null;
+      let lastErr: any = null;
+
+      for (const col of tryColumns) {
+        const { data: d, error: err } = await runVehicleQuery(col, normalized);
+        if (!err) {
+          data = (d ?? []) as any[];
+          lastErr = null;
+          break;
+        }
+        lastErr = err;
+      }
+
+      if (lastErr && data === null) {
+        // Helpful message if table missing or RLS denied
+        const msg = String(lastErr?.message || "Failed to load vehicles.");
+        if (msg.toLowerCase().includes("permission denied") || msg.toLowerCase().includes("rls")) {
+          throw new Error(
+            "Vehicles are blocked by RLS/permissions for this admin session. Add an admin SELECT policy on public.vehicles."
+          );
+        }
+        if (msg.toLowerCase().includes("relation") && msg.toLowerCase().includes("does not exist")) {
+          throw new Error('Table "vehicles" not found in public schema.');
+        }
+        throw new Error(msg);
+      }
+
+      const list = (data ?? []) as VehicleAny[];
+
+      // If no created_at ordering available, we still want stable newest-first if possible
+      const sorted = [...list].sort((a: any, b: any) => {
+        const aa = String(a?.created_at || a?.inserted_at || a?.createdAt || "");
+        const bb = String(b?.created_at || b?.inserted_at || b?.createdAt || "");
+        if (!aa && !bb) return 0;
+        return bb.localeCompare(aa);
+      });
+
+      setVehicles(sorted);
+
+      // reset selection on new fetch
+      setSelectedVehicleId("");
+
+      // If exactly 1 vehicle, auto-apply
+      if (sorted.length === 1) {
+        const v = sorted[0];
+        const vid = String(v.id ?? "only");
+        setSelectedVehicleId(vid);
+
+        const f = vehicleToFormFields(v);
+        setForm((prev) => ({
+          ...prev,
+          ...f,
+        }));
+      }
+    } catch (err: any) {
+      setVehicles([]);
+      setSelectedVehicleId("");
+      setVehiclesError(
+        err?.message || "Failed to load vehicles for this customer."
+      );
+    } finally {
+      setVehiclesLoading(false);
+    }
+  }
+
+  function applyVehicleById(id: string) {
+    setSelectedVehicleId(id);
+    if (!id) return;
+
+    const v =
+      vehicles.find((x) => String(x.id ?? "") === id) ||
+      (vehicles.length === 1 ? vehicles[0] : null);
+
+    if (!v) return;
+
+    const f = vehicleToFormFields(v);
+    setForm((prev) => ({
+      ...prev,
+      ...f,
+    }));
+  }
+
   React.useEffect(() => {
     let isMounted = true;
 
@@ -261,8 +461,7 @@ export default function AdminNewWarrantyPage() {
         if (prefillEmail) {
           const match = list.find(
             (u) =>
-              u.email &&
-              u.email.toLowerCase() === prefillEmail.toLowerCase()
+              u.email && u.email.toLowerCase() === prefillEmail.toLowerCase()
           );
           if (match) {
             setSelectedAppUserId(match.id);
@@ -274,6 +473,10 @@ export default function AdminNewWarrantyPage() {
                   ? match.full_name
                   : inferFullNameFromEmail(match.email),
             }));
+
+            // ✅ also load vehicles when arriving with prefill email
+            lastVehiclesEmailRef.current = "";
+            fetchVehiclesForEmail(match.email);
           }
         }
       } catch (err: any) {
@@ -282,9 +485,7 @@ export default function AdminNewWarrantyPage() {
           err?.message || "Failed to load existing portal customers."
         );
       } finally {
-        if (isMounted) {
-          setAppUsersLoading(false);
-        }
+        if (isMounted) setAppUsersLoading(false);
       }
     }
 
@@ -292,6 +493,7 @@ export default function AdminNewWarrantyPage() {
     return () => {
       isMounted = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefillEmail]);
 
   const filteredAppUsers = React.useMemo(() => {
@@ -307,7 +509,14 @@ export default function AdminNewWarrantyPage() {
   function handleSelectAppUser(id: string) {
     setSelectedAppUserId(id);
     const chosen = appUsers.find((u) => u.id === id);
-    if (!chosen) return;
+
+    if (!chosen) {
+      setVehicles([]);
+      setSelectedVehicleId("");
+      setVehiclesError(null);
+      lastVehiclesEmailRef.current = "";
+      return;
+    }
 
     const email = chosen.email;
     const fullName =
@@ -315,12 +524,44 @@ export default function AdminNewWarrantyPage() {
         ? chosen.full_name
         : inferFullNameFromEmail(chosen.email);
 
+    // clear vehicle area while loading new customer
+    setSelectedVehicleId("");
+    setVehicles([]);
+    setVehiclesError(null);
+    lastVehiclesEmailRef.current = "";
+
     setForm((prev) => ({
       ...prev,
       customer_email: email,
       customer_name: fullName,
+      vehicle_year: "",
+      vehicle_make: "",
+      vehicle_model: "",
+      vehicle_plate: "",
     }));
+
+    // ✅ Fetch vehicles NOW for selected customer email
+    fetchVehiclesForEmail(email);
   }
+
+  // Also fetch vehicles if admin manually types/edits customer email (debounced)
+  React.useEffect(() => {
+    const email = normalizeEmail(form.customer_email);
+    if (!isValidEmailish(email)) {
+      setVehicles([]);
+      setSelectedVehicleId("");
+      setVehiclesError(null);
+      lastVehiclesEmailRef.current = "";
+      return;
+    }
+
+    const t = window.setTimeout(() => {
+      fetchVehiclesForEmail(email);
+    }, 450);
+
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.customer_email]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -329,47 +570,37 @@ export default function AdminNewWarrantyPage() {
     setSuccessId(null);
 
     try {
-      if (!form.customer_email) {
-        throw new Error("Customer email is required.");
-      }
-      if (!form.service_date) {
-        throw new Error("Service date is required.");
-      }
+      if (!form.customer_email) throw new Error("Customer email is required.");
+      if (!form.service_date) throw new Error("Service date is required.");
 
-      // normalize email & name once
       const normalizedEmail = form.customer_email.trim().toLowerCase();
       const typedName = form.customer_name.trim();
 
-      // 👇 this is the value that should go into app_users.full_name
       const fullName =
         typedName.length > 0
           ? typedName
           : inferFullNameFromEmail(normalizedEmail);
 
-      // compute expiration_date from coverage_type + service_date
       let expiration_date: string | null = null;
       if (form.coverage_type === "2_year") {
         expiration_date = addYearsToDate(form.service_date, 2);
       } else if (form.coverage_type === "1_year") {
         expiration_date = addYearsToDate(form.service_date, 1);
       } else {
-        // lifetime / limited → no expiration
         expiration_date = null;
       }
 
-      // Always provide a non-null warranty_number:
       const trimmedManual = form.warranty_number.trim();
       const finalWarrantyNumber =
         trimmedManual ||
         generateWarrantyNumber(form.service_date, normalizedEmail);
 
-      // Build insert payload for warranties (do NOT add new columns here)
       const payload: Record<string, any> = {
         customer_email: normalizedEmail,
         warranty_number: finalWarrantyNumber,
         status: form.status,
         service_performed: form.service_performed || null,
-        service_date: form.service_date, // ISO date (yyyy-mm-dd)
+        service_date: form.service_date,
         coverage_type: form.coverage_type,
         expiration_date,
         vehicle_year: form.vehicle_year ? Number(form.vehicle_year) : null,
@@ -391,22 +622,17 @@ export default function AdminNewWarrantyPage() {
         throw new Error(insertErr.message ?? "Failed to create warranty.");
       }
 
-      // ✅ Warranty created
       setSuccessId(data.id as string);
 
-      // ✅ Make sure there's an app_users row for magic login links
-      // FULL NAME here reflects the CUSTOMER NAME you typed / selected
-      const { error: appUserErr } = await supabaseClient
-        .from("app_users")
-        .upsert(
-          {
-            email: normalizedEmail,
-            full_name: fullName,
-          },
-          {
-            onConflict: "email",
-          }
-        );
+      const { error: appUserErr } = await supabaseClient.from("app_users").upsert(
+        {
+          email: normalizedEmail,
+          full_name: fullName,
+        },
+        {
+          onConflict: "email",
+        }
+      );
 
       if (appUserErr) {
         console.error("[app_users upsert error]", appUserErr);
@@ -463,8 +689,7 @@ export default function AdminNewWarrantyPage() {
                   Create Warranty for Past Customer
                 </CardTitle>
                 <p className="text-xs text-slate-400">
-                  Attach this warranty to an existing Glass Guardian portal
-                  customer or manually enter their details.
+                  Attach this warranty to an existing Glass Guardian portal customer or manually enter their details.
                 </p>
               </div>
             </div>
@@ -486,8 +711,7 @@ export default function AdminNewWarrantyPage() {
                       Attach to Portal Customer
                     </p>
                     <p className="text-[11px] text-slate-400">
-                      Pulls from <span className="font-mono">app_users</span>.
-                      Selecting a customer will auto-fill email and name.
+                      Pulls from <span className="font-mono">app_users</span>. Selecting a customer will auto-fill email and name, then load their vehicles.
                     </p>
                   </div>
                 </div>
@@ -505,10 +729,7 @@ export default function AdminNewWarrantyPage() {
                   </div>
                 ) : appUsers.length === 0 ? (
                   <p className="text-[12px] text-slate-400">
-                    No portal customers found in{" "}
-                    <span className="font-mono">app_users</span> yet. You can
-                    still create a warranty by manually entering the customer
-                    email below.
+                    No portal customers found in <span className="font-mono">app_users</span> yet. You can still create a warranty by manually entering the customer email below.
                   </p>
                 ) : (
                   <div className="space-y-2">
@@ -527,9 +748,7 @@ export default function AdminNewWarrantyPage() {
                       onChange={(e) => handleSelectAppUser(e.target.value)}
                       className="w-full rounded-md border border-cyan-500/40 bg-slate-950/90 px-3 py-2 text-sm text-slate-100 shadow-[0_0_20px_rgba(8,47,73,0.9)]"
                     >
-                      <option value="">
-                        — Select existing portal customer (optional) —
-                      </option>
+                      <option value="">— Select existing portal customer (optional) —</option>
                       {filteredAppUsers.map((u) => (
                         <option key={u.id} value={u.id}>
                           {u.full_name && u.full_name.trim().length > 0
@@ -541,9 +760,11 @@ export default function AdminNewWarrantyPage() {
                     </select>
 
                     <p className="text-[11px] text-slate-500">
-                      This doesn&apos;t change the warranty logic — it just
-                      makes sure the warranty and portal account use the same
-                      email + name so everything stays in sync.
+                      Vehicles loaded:{" "}
+                      <span className="text-slate-300">{vehiclesLoading ? "Loading…" : vehicles.length}</span>
+                      {vehiclesError ? (
+                        <span className="ml-2 text-red-300">({vehiclesError})</span>
+                      ) : null}
                     </p>
                   </div>
                 )}
@@ -558,13 +779,10 @@ export default function AdminNewWarrantyPage() {
                   <Input
                     placeholder="Customer full name"
                     value={form.customer_name}
-                    onChange={(e) =>
-                      updateField("customer_name", e.target.value)
-                    }
+                    onChange={(e) => updateField("customer_name", e.target.value)}
                   />
                   <p className="text-[11px] text-slate-500">
-                    Used to label their portal profile and welcome them by
-                    name. If left empty, we&apos;ll infer a name from the email.
+                    Used to label their portal profile and welcome them by name. If left empty, we&apos;ll infer a name from the email.
                   </p>
                 </div>
 
@@ -577,14 +795,11 @@ export default function AdminNewWarrantyPage() {
                     type="email"
                     placeholder="customer@example.com"
                     value={form.customer_email}
-                    onChange={(e) =>
-                      updateField("customer_email", e.target.value)
-                    }
+                    onChange={(e) => updateField("customer_email", e.target.value)}
                     required
                   />
                   <p className="text-[11px] text-slate-500">
-                    Must match the email you&apos;ll send the magic login link
-                    to.
+                    Must match the email you&apos;ll send the magic login link to.
                   </p>
                 </div>
               </div>
@@ -597,13 +812,10 @@ export default function AdminNewWarrantyPage() {
                   <Input
                     placeholder="Auto or shop warranty #"
                     value={form.warranty_number}
-                    onChange={(e) =>
-                      updateField("warranty_number", e.target.value)
-                    }
+                    onChange={(e) => updateField("warranty_number", e.target.value)}
                   />
                   <p className="text-[11px] text-slate-500">
-                    Leave empty to auto-generate a unique Glass Guardian
-                    warranty number from the service date &amp; customer.
+                    Leave empty to auto-generate a unique Glass Guardian warranty number from the service date &amp; customer.
                   </p>
                 </div>
               </div>
@@ -614,6 +826,94 @@ export default function AdminNewWarrantyPage() {
                   <Car className="w-4 h-4 text-sky-400" />
                   Vehicle
                 </p>
+
+                {/* Vehicle dropdown (auto-gen from vehicles table) */}
+                <div className="rounded-xl border border-sky-500/20 bg-slate-950/60 px-4 py-3 shadow-[0_0_25px_rgba(2,132,199,0.18)] space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[11px] text-slate-400">
+                        Vehicles linked to this customer email (from{" "}
+                        <span className="font-mono">vehicles</span>). Pick one to auto-fill Year/Make/Model/Plate.
+                      </p>
+                    </div>
+                    {vehiclesLoading && (
+                      <div className="flex items-center gap-2 text-[11px] text-slate-300">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-300" />
+                        Loading…
+                      </div>
+                    )}
+                  </div>
+
+                  {vehiclesError && (
+                    <p className="text-[11px] text-red-300 bg-red-950/40 border border-red-500/40 rounded-md px-3 py-1.5">
+                      {vehiclesError}
+                    </p>
+                  )}
+
+                  <select
+                    value={selectedVehicleId}
+                    onChange={(e) => applyVehicleById(e.target.value)}
+                    disabled={!isValidEmailish(form.customer_email) || vehiclesLoading}
+                    className="w-full rounded-md border border-sky-500/30 bg-slate-950/90 px-3 py-2 text-sm text-slate-100 shadow-[0_0_18px_rgba(2,132,199,0.25)] disabled:opacity-60"
+                  >
+                    <option value="">
+                      {isValidEmailish(form.customer_email)
+                        ? vehicles.length
+                          ? "— Select a customer vehicle (optional) —"
+                          : "— No vehicles found for this email —"
+                        : "— Enter/select a customer email to load vehicles —"}
+                    </option>
+
+                    {vehicles.map((v, idx) => {
+                      const id = String(v.id ?? `idx-${idx}`);
+                      return (
+                        <option key={id} value={id}>
+                          {vehicleToLabel(v)}
+                        </option>
+                      );
+                    })}
+                  </select>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="border-slate-700 bg-slate-950/80 text-slate-100 hover:border-sky-400 hover:text-sky-100 hover:bg-slate-950/95"
+                      onClick={() => {
+                        lastVehiclesEmailRef.current = "";
+                        fetchVehiclesForEmail(form.customer_email);
+                      }}
+                      disabled={!isValidEmailish(form.customer_email) || vehiclesLoading}
+                    >
+                      Refresh Vehicles
+                    </Button>
+
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="border-slate-700 bg-slate-950/80 text-slate-100 hover:border-cyan-400 hover:text-cyan-100 hover:bg-slate-950/95"
+                      onClick={() => {
+                        setSelectedVehicleId("");
+                        updateField("vehicle_year", "");
+                        updateField("vehicle_make", "");
+                        updateField("vehicle_model", "");
+                        updateField("vehicle_plate", "");
+                      }}
+                    >
+                      Clear Vehicle Fields
+                    </Button>
+
+                    {selectedVehicleId && (
+                      <span className="text-[11px] text-slate-400">
+                        Auto-filled — you can still edit fields manually.
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Manual vehicle fields */}
                 <div className="grid md:grid-cols-4 gap-3">
                   <div className="space-y-1.5">
                     <Label className="text-[11px] text-slate-400">Year</Label>
@@ -621,36 +921,28 @@ export default function AdminNewWarrantyPage() {
                       type="number"
                       inputMode="numeric"
                       value={form.vehicle_year}
-                      onChange={(e) =>
-                        updateField("vehicle_year", e.target.value)
-                      }
+                      onChange={(e) => updateField("vehicle_year", e.target.value)}
                     />
                   </div>
                   <div className="space-y-1.5">
                     <Label className="text-[11px] text-slate-400">Make</Label>
                     <Input
                       value={form.vehicle_make}
-                      onChange={(e) =>
-                        updateField("vehicle_make", e.target.value)
-                      }
+                      onChange={(e) => updateField("vehicle_make", e.target.value)}
                     />
                   </div>
                   <div className="space-y-1.5">
                     <Label className="text-[11px] text-slate-400">Model</Label>
                     <Input
                       value={form.vehicle_model}
-                      onChange={(e) =>
-                        updateField("vehicle_model", e.target.value)
-                      }
+                      onChange={(e) => updateField("vehicle_model", e.target.value)}
                     />
                   </div>
                   <div className="space-y-1.5">
                     <Label className="text-[11px] text-slate-400">Plate</Label>
                     <Input
                       value={form.vehicle_plate}
-                      onChange={(e) =>
-                        updateField("vehicle_plate", e.target.value)
-                      }
+                      onChange={(e) => updateField("vehicle_plate", e.target.value)}
                       className="uppercase tracking-[0.18em]"
                     />
                   </div>
@@ -667,14 +959,11 @@ export default function AdminNewWarrantyPage() {
                   <Input
                     type="date"
                     value={form.service_date}
-                    onChange={(e) =>
-                      updateField("service_date", e.target.value)
-                    }
+                    onChange={(e) => updateField("service_date", e.target.value)}
                     required
                   />
                   <p className="text-[11px] text-slate-500">
-                    Used to auto-calculate warranty expiration for 1-year and
-                    2-year coverage.
+                    Used to auto-calculate warranty expiration for 1-year and 2-year coverage.
                   </p>
                 </div>
 
@@ -698,8 +987,7 @@ export default function AdminNewWarrantyPage() {
                     <option value="limited">Limited (no expiration)</option>
                   </select>
                   <p className="text-[11px] text-slate-500">
-                    1-year &amp; 2-year are calculated from the Service Date
-                    automatically.
+                    1-year &amp; 2-year are calculated from the Service Date automatically.
                   </p>
                 </div>
 
@@ -744,9 +1032,7 @@ export default function AdminNewWarrantyPage() {
                 </Label>
                 <Input
                   value={form.service_performed}
-                  onChange={(e) =>
-                    updateField("service_performed", e.target.value)
-                  }
+                  onChange={(e) => updateField("service_performed", e.target.value)}
                 />
               </div>
 
@@ -771,8 +1057,7 @@ export default function AdminNewWarrantyPage() {
               {successId && !error && (
                 <p className="text-sm text-emerald-300 bg-emerald-950/40 border border-emerald-500/40 rounded-md px-3 py-2 flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4" />
-                  Warranty created. You can now generate a magic login link for
-                  this email and they&apos;ll see it in their portal.
+                  Warranty created. You can now generate a magic login link for this email and they&apos;ll see it in their portal.
                 </p>
               )}
 

@@ -63,7 +63,6 @@ export function InvoiceVehicleSection({
         .select(
           "id, owner_email, year, make, model, color, vin, license_plate, insurance_carrier, is_default"
         )
-        // case-insensitive match on email (handles USER@ vs user@)
         .ilike("owner_email", normalizedEmail);
 
       if (error) {
@@ -103,7 +102,6 @@ export function InvoiceVehicleSection({
     },
     onSuccess: () => {
       if (!appointmentId) return;
-      // Refresh appointment + tech invoice so everything stays in sync
       queryClient.invalidateQueries({
         queryKey: ["appointment-for-invoice", appointmentId],
       });
@@ -113,27 +111,32 @@ export function InvoiceVehicleSection({
     },
   });
 
+  const selectedVehicle = selectedVehicleId
+    ? userGarage.find((x) => x.id === selectedVehicleId) ?? null
+    : null;
+
   return (
-    <Card className="border border-slate-700/70 bg-slate-900/70 backdrop-blur-xl shadow-[0_18px_60px_rgba(15,23,42,0.8)] print:bg-white print:border-slate-200 print:shadow-none">
+    <Card className="border border-amber-300/18 bg-[linear-gradient(180deg,rgba(255,221,128,0.08),rgba(58,58,63,0.22)_20%,rgba(30,30,34,0.58)_100%)] backdrop-blur-2xl shadow-[0_28px_80px_rgba(0,0,0,0.42),inset_0_1px_0_rgba(255,255,255,0.05)] print:bg-white print:border-slate-200 print:shadow-none">
       <CardHeader className="pb-3">
-        <CardTitle className="flex items-center gap-2 text-slate-50 print:text-slate-900">
-          <Car className="w-4 h-4 text-cyan-300" />
+        <CardTitle className="flex items-center gap-2 text-amber-50 print:text-slate-900">
+          <Car className="w-4 h-4 text-amber-300" />
           Vehicle
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3 text-sm text-slate-100 print:text-slate-800">
-        {/* Show which email we’re using, just for sanity */}
-        <p className="text-[11px] text-slate-400">
+
+      <CardContent className="space-y-3 text-sm text-amber-50 print:text-slate-800">
+        <div className="rounded-lg border border-white/10 bg-[rgba(42,42,46,0.44)] px-3 py-2 text-[11px] text-amber-100/62 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] print:border-slate-200 print:bg-slate-50 print:text-slate-600">
           Garage for:{" "}
-          <span className="font-mono">
+          <span className="font-mono text-amber-50 print:text-slate-900">
             {customerEmail ? customerEmail.trim() : "no email"}
           </span>
-        </p>
+        </div>
 
         <div className="space-y-1">
-          <label className="text-xs text-slate-400">
+          <label className="text-xs text-amber-100/62 print:text-slate-500">
             Select Vehicle from Garage
           </label>
+
           <select
             disabled={loadingGarage || userGarage.length === 0}
             value={selectedVehicleId}
@@ -142,7 +145,7 @@ export function InvoiceVehicleSection({
               setSelectedVehicleId(newId);
               updateVehicleMutation.mutate(newId);
             }}
-            className="w-full bg-slate-950/60 border border-slate-700 rounded px-3 py-2 text-sm text-slate-100 outline-none"
+            className="w-full rounded-xl border border-white/10 bg-[rgba(34,34,38,0.58)] px-3 py-2 text-sm text-amber-50 outline-none backdrop-blur-xl shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] disabled:cursor-not-allowed disabled:opacity-60 print:border-slate-200 print:bg-white print:text-slate-900"
           >
             <option value="">
               {loadingGarage
@@ -160,40 +163,68 @@ export function InvoiceVehicleSection({
           </select>
         </div>
 
-        {/* Details for selected vehicle */}
-        {selectedVehicleId &&
-          (() => {
-            const v = userGarage.find((x) => x.id === selectedVehicleId);
-            if (!v) return null;
-            return (
-              <div className="space-y-1 mt-2">
-                <p className="text-lg font-bold flex items-center gap-2 text-slate-50 print:text-slate-900">
-                  {v.year} {v.make} {v.model}
-                </p>
-                {v.color && <p>Color: {v.color}</p>}
-                {v.vin && <p className="break-all">VIN: {v.vin}</p>}
-                {v.license_plate && <p>Plate: {v.license_plate}</p>}
-                {typeof v.is_default === "boolean" && (
-                  <p className="text-xs text-slate-400">
-                    {v.is_default ? "Default vehicle" : "Non-default vehicle"}
-                  </p>
-                )}
-                {v.insurance_carrier && (
-                  <p className="text-xs text-slate-400">
-                    Insurance: {v.insurance_carrier}
-                  </p>
-                )}
-              </div>
-            );
-          })()}
+        {updateVehicleMutation.isError && (
+          <p className="text-xs text-red-400">
+            Failed to update vehicle on appointment.
+          </p>
+        )}
 
-        {!loadingGarage &&
-          userGarage.length === 0 &&
-          !selectedVehicleId && (
-            <p className="text-slate-300 text-xs">
-              No vehicles found for this customer email in garage.
+        {updateVehicleMutation.isSuccess && (
+          <p className="text-xs text-emerald-300">
+            Vehicle updated.
+          </p>
+        )}
+
+        {selectedVehicle && (
+          <div className="mt-2 space-y-2 rounded-xl border border-white/10 bg-[rgba(42,42,46,0.42)] p-4 backdrop-blur-xl shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] print:border-slate-200 print:bg-white">
+            <p className="flex items-center gap-2 text-lg font-bold text-amber-50 print:text-slate-900">
+              {selectedVehicle.year} {selectedVehicle.make} {selectedVehicle.model}
             </p>
-          )}
+
+            <div className="space-y-1 text-sm">
+              {selectedVehicle.color && (
+                <p>
+                  <span className="text-amber-100/62 print:text-slate-500">Color:</span>{" "}
+                  <span className="text-amber-50 print:text-slate-900">{selectedVehicle.color}</span>
+                </p>
+              )}
+
+              {selectedVehicle.vin && (
+                <p className="break-all">
+                  <span className="text-amber-100/62 print:text-slate-500">VIN:</span>{" "}
+                  <span className="text-amber-50 print:text-slate-900">{selectedVehicle.vin}</span>
+                </p>
+              )}
+
+              {selectedVehicle.license_plate && (
+                <p>
+                  <span className="text-amber-100/62 print:text-slate-500">Plate:</span>{" "}
+                  <span className="text-amber-50 print:text-slate-900">{selectedVehicle.license_plate}</span>
+                </p>
+              )}
+            </div>
+
+            <div className="flex flex-wrap gap-2 pt-1">
+              {typeof selectedVehicle.is_default === "boolean" && (
+                <span className="inline-flex items-center rounded-full border border-amber-300/20 bg-amber-400/10 px-2.5 py-1 text-[11px] text-amber-100 print:border-slate-300 print:bg-slate-100 print:text-slate-700">
+                  {selectedVehicle.is_default ? "Default vehicle" : "Non-default vehicle"}
+                </span>
+              )}
+
+              {selectedVehicle.insurance_carrier && (
+                <span className="inline-flex items-center rounded-full border border-white/10 bg-[rgba(34,34,38,0.42)] px-2.5 py-1 text-[11px] text-amber-100/80 print:border-slate-300 print:bg-slate-100 print:text-slate-700">
+                  Insurance: {selectedVehicle.insurance_carrier}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {!loadingGarage && userGarage.length === 0 && !selectedVehicleId && (
+          <div className="rounded-lg border border-white/10 bg-[rgba(34,34,38,0.38)] px-3 py-2 text-xs text-amber-50/70 backdrop-blur-xl print:border-slate-200 print:bg-slate-50 print:text-slate-700">
+            No vehicles found for this customer email in garage.
+          </div>
+        )}
       </CardContent>
     </Card>
   );

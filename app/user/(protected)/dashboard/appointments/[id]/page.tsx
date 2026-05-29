@@ -21,8 +21,6 @@ import {
   ArrowRight,
   ShieldCheck,
   CheckCircle,
-  Loader2,
-  PenLine,
 } from "lucide-react";
 import { format } from "date-fns";
 import { motion, useReducedMotion } from "framer-motion";
@@ -33,38 +31,20 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import ImageLightbox from "@/components/media/ImageLightbox";
 
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-} from "@/components/ui/dialog";
-
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import SignatureCanvas from "@/components/forms/SignatureCanvas";
-
-// ✅ Reuse your tech 10-step component (read-only on user side)
 import ServiceProgress, {
   type ServiceStatusKey,
 } from "@/components/tech/schedule/tenstep/ServiceProgress";
 
-// ✅ NEW extracted helpers + hook + components
 import {
   type AnyObj,
   type WaiverRow,
   CANCELLABLE_STATUSES,
   canCancelStatus,
-  buildWaiverText,
   getWaiverSigningWindow,
   getStatusVisuals,
   getBillingMeta,
   isCrackOut,
   crackOutSummary,
-  normalizeInitials,
-  normalizeName,
 } from "@/lib/appointments/helpers";
 
 import { useAppointmentRealtime } from "@/lib/hooks/useAppointmentRealtime";
@@ -73,15 +53,13 @@ import { CrackOutTrustDialog } from "@/components/shared/appointments/CrackOutTr
 import { WaiverCard } from "@/components/shared/appointments/WaiverCard";
 import { TechnicianCard } from "@/components/shared/appointments/TechnicianCard";
 
-async function getAccessTokenBestEffort(): Promise<string> {
-  const { data: s1 } = await supabaseClient.auth.getSession();
-  let tok = s1?.session?.access_token || "";
-  if (!tok) {
-    await supabaseClient.auth.refreshSession().catch(() => {});
-    const { data: s2 } = await supabaseClient.auth.getSession();
-    tok = s2?.session?.access_token || "";
-  }
-  return tok;
+function parseLocalDate(date?: string | null) {
+  if (!date) return null;
+
+  const [year, month, day] = String(date).split("-").map(Number);
+  if (!year || !month || !day) return null;
+
+  return new Date(year, month - 1, day);
 }
 
 export default function AppointmentDetailPage() {
@@ -96,24 +74,17 @@ export default function AppointmentDetailPage() {
   const [lightboxIndex, setLightboxIndex] = React.useState(0);
   const [userEmail, setUserEmail] = React.useState<string | null>(null);
   const [cancelError, setCancelError] = React.useState<string | null>(null);
-
-  // crack-out trust pop
   const [trustOpen, setTrustOpen] = React.useState(false);
 
-  // waiver dialog + form
-  const [waiverOpen, setWaiverOpen] = React.useState(false);
-  const [waiverName, setWaiverName] = React.useState("");
-  const [waiverInitials, setWaiverInitials] = React.useState("");
-  const [waiverSignature, setWaiverSignature] = React.useState<string | null>(
-    null
-  );
-  const [waiverError, setWaiverError] = React.useState<string | null>(null);
+  const waiverHref = appointmentId
+    ? `/user/dashboard/appointments/${appointmentId}/waiver`
+    : "/user/dashboard/appointments";
 
-  // Ensure authenticated user
   React.useEffect(() => {
     (async () => {
       const { data } = await supabaseClient.auth.getSession();
       const session = data?.session ?? null;
+
       if (!session?.user) {
         router.replace(
           `/user/login?redirect=${encodeURIComponent(
@@ -122,19 +93,11 @@ export default function AppointmentDetailPage() {
         );
         return;
       }
+
       setUserEmail(session.user.email ?? null);
-
-      // prefill name best-effort
-      const full =
-        (session.user.user_metadata?.full_name as string | undefined) ??
-        (session.user.user_metadata?.name as string | undefined) ??
-        "";
-      if (full && !waiverName) setWaiverName(String(full));
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appointmentId]);
+  }, [appointmentId, router]);
 
-  /** Appointment */
   const {
     data: appointment,
     isLoading: loadingAppointment,
@@ -152,12 +115,12 @@ export default function AppointmentDetailPage() {
         .eq("id", appointmentId)
         .limit(1)
         .single();
+
       if (error) throw error;
       return data as AnyObj;
     },
   });
 
-  /** Waiver exists? */
   const { data: waiverRow = null } = useQuery({
     queryKey: ["appointment-waiver", appointmentId],
     enabled: !!appointmentId && !!userEmail,
@@ -169,7 +132,7 @@ export default function AppointmentDetailPage() {
         const { data, error } = await supabaseClient
           .from("appointment_waivers")
           .select(
-            "id,appointment_id,signer_name,initials,signature_storage_path,created_at"
+            "id,appointment_id,signer_name,initials,signature_png_path,signature_name,signed_at,created_at"
           )
           .eq("appointment_id", appointmentId)
           .maybeSingle();
@@ -178,6 +141,7 @@ export default function AppointmentDetailPage() {
           if ((error as any)?.code === "PGRST205") return null;
           throw error;
         }
+
         return (data ?? null) as WaiverRow | null;
       } catch {
         return null;
@@ -187,10 +151,6 @@ export default function AppointmentDetailPage() {
 
   const waiverSigned = !!waiverRow?.id;
 
-  /**
-   * ✅ Invoice 존재 여부
-   * Only show "View Invoice" if an actual invoice row exists.
-   */
   const { data: invoiceRow = null } = useQuery({
     queryKey: ["invoice_by_appt", appointmentId],
     enabled: !!appointmentId && !!userEmail,
@@ -211,6 +171,7 @@ export default function AppointmentDetailPage() {
           if ((error as any)?.code === "PGRST205") return null;
           throw error;
         }
+
         return (data ?? null) as AnyObj | null;
       } catch {
         return null;
@@ -220,16 +181,12 @@ export default function AppointmentDetailPage() {
 
   const canViewInvoice = !!invoiceRow?.id;
 
-  /**
-   * ✅ REALTIME: extracted hook (appointments + waivers)
-   */
   useAppointmentRealtime({
     appointmentId,
     userEmail,
     queryClient,
   });
 
-  /** Vehicle */
   const { data: vehicle } = useQuery({
     queryKey: ["vehicle", appointment?.vehicle_id],
     enabled: !!appointment?.vehicle_id && !!userEmail,
@@ -240,12 +197,12 @@ export default function AppointmentDetailPage() {
         .eq("id", appointment!.vehicle_id)
         .limit(1)
         .single();
+
       if (error) throw error;
       return data as AnyObj;
     },
   });
 
-  /** Photos (tolerate missing table) */
   const { data: photos = [] } = useQuery({
     queryKey: ["photos", appointmentId],
     enabled: !!appointmentId && !!userEmail,
@@ -261,6 +218,7 @@ export default function AppointmentDetailPage() {
           if ((error as any)?.code === "PGRST205") return [];
           throw error;
         }
+
         return (data ?? []) as AnyObj[];
       } catch {
         return [];
@@ -268,7 +226,6 @@ export default function AppointmentDetailPage() {
     },
   });
 
-  /** Technician */
   const { data: technician } = useQuery({
     queryKey: ["technician", appointment?.technician_email],
     enabled: !!appointment?.technician_email && !!userEmail,
@@ -279,20 +236,22 @@ export default function AppointmentDetailPage() {
         .eq("email", appointment!.technician_email)
         .limit(1)
         .single();
+
       if (error) throw error;
       return data as AnyObj;
     },
   });
 
-  /** Open trust dialog once per appointment if crack-out */
   React.useEffect(() => {
     if (!appointmentId || !appointment) return;
     if (!isCrackOut(appointment)) return;
 
     const key = `gg_ack_crackout_detail_${appointmentId}`;
+
     try {
       const already = window.localStorage.getItem(key) === "1";
       if (already) return;
+
       setTrustOpen(true);
       window.localStorage.setItem(key, "1");
     } catch {
@@ -303,6 +262,7 @@ export default function AppointmentDetailPage() {
   const cancelMutation = useMutation({
     mutationFn: async (id: string) => {
       setCancelError(null);
+
       const { data, error } = await supabaseClient
         .from("appointments")
         .update({
@@ -315,11 +275,13 @@ export default function AppointmentDetailPage() {
         .maybeSingle();
 
       if (error) throw error;
+
       if (!data) {
         throw new Error(
           "Unable to cancel — your appointment may already be in progress or en route."
         );
       }
+
       return data;
     },
     onSuccess: () => {
@@ -331,63 +293,6 @@ export default function AppointmentDetailPage() {
     },
   });
 
-  const waiverSignMutation = useMutation({
-    mutationFn: async () => {
-      setWaiverError(null);
-
-      if (!appointmentId || !appointment) throw new Error("Missing appointment.");
-
-      const rules = getWaiverSigningWindow(appointment);
-      if (!rules.canSignNow)
-        throw new Error(rules.reason ?? "Waiver signing is not available yet.");
-
-      const n = normalizeName(waiverName);
-      const i = normalizeInitials(waiverInitials);
-
-      if (n.length < 2) throw new Error("Name required");
-      if (i.length < 2) throw new Error("Initials required");
-      if (!waiverSignature) throw new Error("Signature required");
-
-      const token = await getAccessTokenBestEffort();
-      if (!token) throw new Error("Session expired. Please re-login.");
-
-      const waiverText = buildWaiverText(appointment);
-
-      const res = await fetch(`/api/appointments/${appointmentId}/waiver`, {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-          authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          signer_name: n,
-          initials: i,
-          signer_email: userEmail ?? null,
-          waiver_version: "v1",
-          waiver_text: waiverText,
-          signature_data_url: waiverSignature,
-          signature_type: "drawn",
-          signer_role: "user",
-          signature_name: n,
-        }),
-      });
-
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error ?? "Failed to sign waiver.");
-      return json;
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["appointment-waiver", appointmentId],
-      });
-      queryClient.invalidateQueries({ queryKey: ["appointment", appointmentId] });
-      setWaiverOpen(false);
-      setWaiverError(null);
-    },
-    onError: (e: any) => setWaiverError(e?.message ?? "Failed to sign waiver."),
-  });
-
   const handleCancel = () => {
     if (!appointmentId || !appointment) return;
     if (!canCancelStatus(appointment.status)) return;
@@ -395,6 +300,7 @@ export default function AppointmentDetailPage() {
     const ok = window.confirm(
       "Are you sure you want to cancel this appointment? We’ll release your time slot."
     );
+
     if (!ok) return;
 
     cancelMutation.mutate(appointmentId);
@@ -451,13 +357,15 @@ export default function AppointmentDetailPage() {
     );
   }
 
+  const scheduledLocalDate = parseLocalDate(
+    appointment.scheduled_date ? String(appointment.scheduled_date) : null
+  );
+
   const cancellable = canCancelStatus(appointment.status);
   const statusVisuals = getStatusVisuals(appointment.status);
   const billingMeta = getBillingMeta(appointment);
   const crackOut = isCrackOut(appointment);
   const crack = crackOut ? crackOutSummary(appointment) : null;
-
-  const waiverText = buildWaiverText(appointment);
   const waiverRules = getWaiverSigningWindow(appointment);
 
   const requiresWaiver =
@@ -471,7 +379,130 @@ export default function AppointmentDetailPage() {
   return (
     <div className="min-h-screen p-4 md:p-8 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
       <div className="max-w-7xl mx-auto">
-        {/* Crack-out trust dialog */}
+        {requiresWaiver && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className={`mb-6 overflow-hidden rounded-3xl border backdrop-blur-xl shadow-2xl ${
+              waiverSigned
+                ? "border-emerald-400/30 bg-emerald-500/10"
+                : "border-amber-400/30 bg-amber-500/10"
+            }`}
+          >
+            <div className="relative p-5 md:p-6">
+              <div className="pointer-events-none absolute inset-0 overflow-hidden">
+                <div
+                  className={`absolute inset-y-0 -left-1/2 w-1/2 ${
+                    waiverSigned
+                      ? "bg-gradient-to-r from-transparent via-emerald-300/[0.035] to-transparent"
+                      : "bg-gradient-to-r from-transparent via-amber-300/[0.04] to-transparent"
+                  } animate-[waiverSweep_7s_linear_infinite]`}
+                />
+              </div>
+
+              <div className="relative flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                <div className="flex items-start gap-4">
+                  <div
+                    className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border ${
+                      waiverSigned
+                        ? "border-emerald-300/30 bg-emerald-400/15 text-emerald-100"
+                        : "border-amber-300/30 bg-amber-400/15 text-amber-100"
+                    }`}
+                  >
+                    {waiverSigned ? (
+                      <CheckCircle className="h-7 w-7" />
+                    ) : (
+                      <ShieldCheck className="h-7 w-7" />
+                    )}
+                  </div>
+
+                  <div className="space-y-1">
+                    <div
+                      className={`text-xs font-bold uppercase tracking-[0.22em] ${
+                        waiverSigned ? "text-emerald-200" : "text-amber-200"
+                      }`}
+                    >
+                      Service Authorization
+                    </div>
+
+                    <h2
+                      className={`text-xl md:text-2xl font-bold ${
+                        waiverSigned ? "text-emerald-50" : "text-amber-50"
+                      }`}
+                    >
+                      {waiverSigned
+                        ? "Waiver Successfully Signed"
+                        : "Waiver Required Before Service"}
+                    </h2>
+
+                    <p
+                      className={`max-w-2xl text-sm md:text-base ${
+                        waiverSigned ? "text-emerald-100/90" : "text-amber-100/90"
+                      }`}
+                    >
+                      {waiverSigned
+                        ? "Your authorization has been securely recorded. No additional action is required at this time."
+                        : "Please review and complete the service waiver before your technician begins work on the vehicle."}
+                    </p>
+
+                    {waiverSigned && waiverRow?.signer_name && (
+                      <p className="text-xs text-emerald-100/80">
+                        Signed by{" "}
+                        <span className="font-semibold">{waiverRow.signer_name}</span>
+                        {(waiverRow as any)?.signed_at || waiverRow?.created_at ? (
+                          <>
+                            {" "}
+                            on{" "}
+                            <span className="font-semibold">
+                              {format(
+                                new Date(
+                                  String(
+                                    (waiverRow as any)?.signed_at ??
+                                      waiverRow?.created_at
+                                  )
+                                ),
+                                "MMM d, yyyy"
+                              )}
+                            </span>
+                          </>
+                        ) : null}
+                        .
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  {!waiverSigned ? (
+                    <Link href={waiverHref}>
+                      <Button className="bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold shadow-[0_0_30px_rgba(251,191,36,0.25)]">
+                        Review & Sign Waiver
+                        <ArrowRight className="w-4 h-4 ml-2" />
+                      </Button>
+                    </Link>
+                  ) : (
+                    <div className="inline-flex items-center rounded-full border border-emerald-300/30 bg-emerald-400/15 px-4 py-2 text-sm font-semibold text-emerald-50">
+                      <CheckCircle className="w-4 h-4 mr-2" />
+                      Signed
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <style jsx>{`
+              @keyframes waiverSweep {
+                0% {
+                  transform: translateX(0%);
+                }
+                100% {
+                  transform: translateX(300%);
+                }
+              }
+            `}</style>
+          </motion.div>
+        )}
+
         {crackOut && (
           <CrackOutTrustDialog
             appointment={appointment}
@@ -480,136 +511,6 @@ export default function AppointmentDetailPage() {
             canViewInvoice={canViewInvoice}
           />
         )}
-
-        {/* Waiver dialog */}
-        <Dialog
-          open={waiverOpen}
-          onOpenChange={(v) => {
-            if (!v) {
-              setWaiverError(null);
-              setWaiverSignature(null);
-            }
-            setWaiverOpen(v);
-          }}
-        >
-          <DialogContent className="max-w-lg border border-slate-800 bg-slate-950/95 text-slate-50 backdrop-blur-xl shadow-[0_30px_120px_rgba(2,132,199,0.12)]">
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <ShieldCheck className="w-5 h-5 text-cyan-300" />
-                Service Waiver
-              </DialogTitle>
-              <DialogDescription className="text-slate-300">
-                You can review anytime. Signing is available only on the day of service (local
-                time).
-              </DialogDescription>
-            </DialogHeader>
-
-            <pre className="max-h-44 overflow-y-auto text-xs text-slate-300 border border-slate-800 rounded p-3 bg-slate-900/60">
-              {waiverText}
-            </pre>
-
-            {waiverSigned ? (
-              <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4 text-sm">
-                <div className="flex items-start gap-3">
-                  <CheckCircle className="w-5 h-5 text-emerald-300 mt-0.5" />
-                  <div className="space-y-1">
-                    <p className="font-semibold text-emerald-100">Waiver signed</p>
-                    <p className="text-slate-200/90">
-                      Signed by{" "}
-                      <span className="font-semibold">{waiverRow?.signer_name}</span>
-                      {waiverRow?.created_at ? (
-                        <>
-                          {" "}
-                          on{" "}
-                          <span className="font-semibold">
-                            {format(new Date(String(waiverRow.created_at)), "MMM d, yyyy")}
-                          </span>
-                        </>
-                      ) : null}
-                      .
-                    </p>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <>
-                {!waiverRules.canSignNow && (
-                  <div className="rounded-xl border border-amber-400/35 bg-amber-500/10 p-4 text-sm text-amber-100">
-                    <div className="flex items-start gap-3">
-                      <TriangleAlert className="w-5 h-5 text-amber-300 mt-0.5" />
-                      <div className="space-y-1">
-                        <p className="font-semibold">Signing not available yet</p>
-                        <p className="text-amber-100/90">
-                          {waiverRules.reason ??
-                            "You’ll be able to sign on the day of your appointment."}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <Label>Name</Label>
-                    <Input value={waiverName} onChange={(e) => setWaiverName(e.target.value)} />
-                  </div>
-                  <div>
-                    <Label>Initials</Label>
-                    <Input
-                      value={waiverInitials}
-                      onChange={(e) => setWaiverInitials(e.target.value)}
-                    />
-                  </div>
-                </div>
-
-                <SignatureCanvas
-                  label="Signature"
-                  valueDataUrl={waiverSignature}
-                  onChangeDataUrl={setWaiverSignature}
-                />
-
-                {waiverError && (
-                  <p className="text-xs text-red-400 flex items-center gap-1">
-                    <TriangleAlert className="w-3 h-3" />
-                    {waiverError}
-                  </p>
-                )}
-
-                <DialogFooter className="gap-2 sm:gap-3">
-                  <Button
-                    variant="outline"
-                    className="w-full sm:w-auto border-slate-700 bg-slate-900/70 text-slate-50 hover:bg-slate-800"
-                    onClick={() => setWaiverOpen(false)}
-                  >
-                    Close
-                  </Button>
-
-                  <Button
-                    onClick={() => waiverSignMutation.mutate()}
-                    className="w-full sm:w-auto bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-semibold"
-                    disabled={!waiverRules.canSignNow || waiverSignMutation.isPending}
-                    title={
-                      waiverRules.canSignNow
-                        ? "Sign waiver"
-                        : waiverRules.reason ?? "Signing not available yet"
-                    }
-                  >
-                    {waiverSignMutation.isPending ? (
-                      <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        Signing...
-                      </>
-                    ) : (
-                      <>
-                        Sign Now <PenLine className="w-4 h-4 ml-1" />
-                      </>
-                    )}
-                  </Button>
-                </DialogFooter>
-              </>
-            )}
-          </DialogContent>
-        </Dialog>
 
         <div className="mb-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
           <Link href="/user/dashboard/appointments">
@@ -624,25 +525,6 @@ export default function AppointmentDetailPage() {
           </Link>
 
           <div className="flex flex-wrap items-center gap-2">
-            {/* Waiver quick action */}
-            {requiresWaiver && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setWaiverOpen(true)}
-                className={`rounded-full border ${
-                  waiverSigned
-                    ? "border-emerald-400/60 text-emerald-100 hover:bg-emerald-500/10"
-                    : "border-amber-400/60 text-amber-100 hover:bg-amber-500/10"
-                }`}
-                title="Review waiver"
-              >
-                <ShieldCheck className="w-4 h-4 mr-2" />
-                {waiverSigned ? "Waiver Signed" : "Waiver"}
-              </Button>
-            )}
-
-            {/* Only show if invoice exists */}
             {canViewInvoice && (
               <Link href={`/user/dashboard/pay/${appointment.id}`}>
                 <Button
@@ -671,7 +553,6 @@ export default function AppointmentDetailPage() {
           </div>
         </div>
 
-        {/* Header */}
         <div className="mb-4 md:mb-8">
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
             <div>
@@ -706,19 +587,21 @@ export default function AppointmentDetailPage() {
                 Appointment #{String(appointment.id).slice(0, 8)}
               </p>
 
-              {/* Waiver notification (portal requested) */}
               {requiresWaiver && !waiverSigned && portalRequested && (
-                <div className="mt-3 rounded-xl border border-cyan-400/25 bg-cyan-500/10 p-3 text-xs text-cyan-100">
-                  <div className="flex items-start gap-2">
-                    <ShieldCheck className="w-4 h-4 mt-0.5 text-cyan-200" />
-                    <div className="space-y-1">
-                      <p className="font-semibold">Waiver requested in your portal</p>
-                      <p className="text-cyan-100/90">
-                        You can review now. Signing opens on the day of service (local time).
-                      </p>
+                <Link href={waiverHref}>
+                  <div className="mt-3 rounded-xl border border-cyan-400/25 bg-cyan-500/10 p-3 text-xs text-cyan-100 transition hover:bg-cyan-500/15">
+                    <div className="flex items-start gap-2">
+                      <ShieldCheck className="w-4 h-4 mt-0.5 text-cyan-200" />
+                      <div className="space-y-1">
+                        <p className="font-semibold">Waiver requested in your portal</p>
+                        <p className="text-cyan-100/90">
+                          Tap here to open the full waiver page. Signing opens on the day
+                          of service.
+                        </p>
+                      </div>
                     </div>
                   </div>
-                </div>
+                </Link>
               )}
             </div>
 
@@ -750,15 +633,15 @@ export default function AppointmentDetailPage() {
           </div>
 
           {cancelError && <p className="mt-2 text-sm text-red-400">{cancelError}</p>}
+
           {!cancellable && appointment.status !== "cancelled" && (
             <p className="mt-2 text-xs text-slate-400">
-              Once your technician is en route or on-site, the appointment can no longer be
-              cancelled online. Please call us if you need help.
+              Once your technician is en route or on-site, the appointment can no longer
+              be cancelled online. Please call us if you need help.
             </p>
           )}
         </div>
 
-        {/* Crack-out banner */}
         {crackOut && (
           <Card className="mb-8 border border-amber-400/35 bg-gradient-to-br from-slate-950 via-amber-950/20 to-slate-950 shadow-[0_20px_70px_rgba(251,191,36,0.12)]">
             <CardHeader className="pb-3">
@@ -767,13 +650,14 @@ export default function AppointmentDetailPage() {
                 Crack-out transparency update
               </CardTitle>
             </CardHeader>
+
             <CardContent className="space-y-3 text-sm text-slate-200/90">
               <div className="flex items-start gap-3">
                 <HeartHandshake className="w-5 h-5 mt-0.5 text-amber-300" />
                 <p>
-                  We’re sorry this happened. Crack-outs are rare, and when they do happen we
-                  document everything, communicate clearly, and guide you through next steps so you
-                  can trust the outcome.
+                  We’re sorry this happened. Crack-outs are rare, and when they do happen
+                  we document everything, communicate clearly, and guide you through next
+                  steps so you can trust the outcome.
                 </p>
               </div>
 
@@ -782,8 +666,11 @@ export default function AppointmentDetailPage() {
                   <p className="text-xs font-semibold text-slate-200 mb-1">Occurred</p>
                   <p className="text-sm text-slate-100">{crack?.occurredAt ?? "—"}</p>
                 </div>
+
                 <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-                  <p className="text-xs font-semibold text-slate-200 mb-1">Replacement</p>
+                  <p className="text-xs font-semibold text-slate-200 mb-1">
+                    Replacement
+                  </p>
                   <p className="text-sm text-slate-100">
                     {appointment.replacement_required ? "May be required" : "Not required / TBD"}
                   </p>
@@ -802,9 +689,10 @@ export default function AppointmentDetailPage() {
 
               {appointment.crack_out_photo_url && (
                 <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-                  <p className="text-xs font-semibold text-slate-200 mb-2">Photo documentation</p>
+                  <p className="text-xs font-semibold text-slate-200 mb-2">
+                    Photo documentation
+                  </p>
                   <div className="relative overflow-hidden rounded-lg border border-slate-700/70">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={String(appointment.crack_out_photo_url)}
                       alt="Crack-out documentation"
@@ -817,19 +705,16 @@ export default function AppointmentDetailPage() {
           </Card>
         )}
 
-        {/* Status Timeline (read-only) */}
         <ServiceProgress
-  status={appointment.status ?? null}
-  busy={false}
-  className="mb-8"
-  readOnly
-  onStatusClickAction={(() => {}) as (next: ServiceStatusKey) => void}
-/>
+          status={appointment.status ?? null}
+          busy={false}
+          className="mb-8"
+          readOnly
+          onStatusClickAction={(() => {}) as (next: ServiceStatusKey) => void}
+        />
 
         <div className="grid lg:grid-cols-3 gap-8">
-          {/* Main Details */}
           <div className="lg:col-span-2 space-y-6">
-            {/* Service Details */}
             <Card className={statusVisuals.card}>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-slate-50">
@@ -837,6 +722,7 @@ export default function AppointmentDetailPage() {
                   Service Details
                 </CardTitle>
               </CardHeader>
+
               <CardContent className="space-y-4 text-slate-100">
                 {vehicle && (
                   <div className="flex items-center gap-3 p-4 bg-slate-900/80 rounded-lg border border-slate-700">
@@ -845,9 +731,13 @@ export default function AppointmentDetailPage() {
                       <p className="font-semibold">
                         {vehicle.year} {vehicle.make} {vehicle.model}
                       </p>
-                      {vehicle.color && <p className="text-sm text-slate-300">{vehicle.color}</p>}
+                      {vehicle.color && (
+                        <p className="text-sm text-slate-300">{vehicle.color}</p>
+                      )}
                       {vehicle.license_plate && (
-                        <p className="text-sm text-slate-300">Plate: {vehicle.license_plate}</p>
+                        <p className="text-sm text-slate-300">
+                          Plate: {vehicle.license_plate}
+                        </p>
                       )}
                     </div>
                   </div>
@@ -858,7 +748,9 @@ export default function AppointmentDetailPage() {
                     <Calendar className="w-5 h-5 text-slate-300 mt-0.5" />
                     <div>
                       <p className="font-medium">
-                        {format(new Date(appointment.scheduled_date), "EEEE, MMMM d, yyyy")}
+                        {scheduledLocalDate
+                          ? format(scheduledLocalDate, "EEEE, MMMM d, yyyy")
+                          : "Not scheduled"}
                       </p>
                       {appointment.scheduled_time_start && (
                         <p className="text-sm text-slate-300">
@@ -881,8 +773,12 @@ export default function AppointmentDetailPage() {
 
                 {appointment.damage_description && (
                   <div className="p-4 bg-amber-500/10 rounded-lg border border-amber-400/50">
-                    <p className="text-sm font-medium text-amber-200 mb-1">Damage Description:</p>
-                    <p className="text-sm text-amber-100">{appointment.damage_description}</p>
+                    <p className="text-sm font-medium text-amber-200 mb-1">
+                      Damage Description:
+                    </p>
+                    <p className="text-sm text-amber-100">
+                      {appointment.damage_description}
+                    </p>
                   </div>
                 )}
 
@@ -891,13 +787,14 @@ export default function AppointmentDetailPage() {
                     <p className="text-sm font-medium text-sky-200 mb-1">
                       Special Instructions:
                     </p>
-                    <p className="text-sm text-sky-100">{appointment.notes_customer}</p>
+                    <p className="text-sm text-sky-100">
+                      {appointment.notes_customer}
+                    </p>
                   </div>
                 )}
               </CardContent>
             </Card>
 
-            {/* Damage Photos */}
             {photos.length > 0 && (
               <Card className="border border-slate-800 bg-slate-950/80 shadow-2xl">
                 <CardHeader>
@@ -906,6 +803,7 @@ export default function AppointmentDetailPage() {
                     Damage Photos ({photos.length})
                   </CardTitle>
                 </CardHeader>
+
                 <CardContent>
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                     {photos.map((photo, idx) => (
@@ -918,16 +816,18 @@ export default function AppointmentDetailPage() {
                         }
                         animate={{ opacity: 1, scale: 1 }}
                         transition={{ delay: idx * 0.06 }}
-                        whileHover={prefersReducedMotion ? undefined : { scale: 1.05, zIndex: 10 }}
+                        whileHover={
+                          prefersReducedMotion ? undefined : { scale: 1.05, zIndex: 10 }
+                        }
                         onClick={() => openLightbox(idx)}
                         className="group relative aspect-square rounded-xl overflow-hidden border border-slate-700 hover:border-sky-400 transition-all cursor-pointer shadow-lg hover:shadow-sky-500/30"
                       >
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
                           src={String(photo.file_url ?? "")}
                           alt={String(photo.photo_type ?? "Damage photo")}
                           className="w-full h-full object-cover"
                         />
+
                         <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-all flex items-end p-3">
                           <div className="w-full">
                             <span className="text-white text-xs font-semibold block mb-1">
@@ -944,13 +844,12 @@ export default function AppointmentDetailPage() {
             )}
           </div>
 
-          {/* Sidebar */}
           <div className="space-y-6">
             <WaiverCard
               requiresWaiver={requiresWaiver}
               waiverSigned={waiverSigned}
               waiverRulesReason={waiverSigned ? null : waiverRules.reason}
-              onOpenWaiver={() => setWaiverOpen(true)}
+              onOpenWaiver={() => router.push(waiverHref)}
               signerName={waiverRow?.signer_name ?? null}
               initials={waiverRow?.initials ?? null}
             />
@@ -970,13 +869,14 @@ export default function AppointmentDetailPage() {
                     </span>
                   </CardTitle>
                 </CardHeader>
+
                 <CardContent>
                   <p className="text-4xl font-bold mb-2 tabular-nums">
                     {billingMeta.amount !== null
                       ? `$${billingMeta.amount.toFixed(2)}`
                       : billingMeta.phase === "cancelled"
-                      ? "No Charges"
-                      : "--"}
+                        ? "No Charges"
+                        : "--"}
                   </p>
                   <p className="text-sm opacity-90">{billingMeta.subtitle}</p>
 
@@ -1005,6 +905,7 @@ export default function AppointmentDetailPage() {
                     Warranty Active
                   </CardTitle>
                 </CardHeader>
+
                 <CardContent>
                   <p className="text-sm text-slate-300 mb-3">
                     Your repair is covered by our warranty.
@@ -1030,6 +931,7 @@ export default function AppointmentDetailPage() {
                     Crack-out Actions
                   </CardTitle>
                 </CardHeader>
+
                 <CardContent className="space-y-2">
                   {canViewInvoice && (
                     <Link href={`/user/dashboard/pay/${appointment.id}`}>

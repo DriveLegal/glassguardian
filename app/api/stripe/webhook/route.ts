@@ -7,7 +7,6 @@ import { createClient } from "@supabase/supabase-js";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Supabase service role
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
@@ -24,8 +23,18 @@ function isPaidCheckoutEvent(type: string) {
   );
 }
 
+function isDepositSession(meta: Record<string, string>) {
+  const type = String(meta.type || meta.payment_type || "").toLowerCase();
+  return (
+    type === "deposit" ||
+    type === "appointment_deposit" ||
+    type === "repair_deposit" ||
+    Boolean(meta.deposit_request_id)
+  );
+}
+
 export async function POST(req: Request) {
-  const stripe = getStripe(); // uses your configured apiVersion
+  const stripe = getStripe();
   const sig = req.headers.get("stripe-signature");
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
@@ -50,113 +59,172 @@ export async function POST(req: Request) {
   }
 
   try {
-    // ✅ Handle the paid checkout events (instant + async methods)
-    if (isPaidCheckoutEvent(event.type)) {
-      const session = event.data.object as Stripe.Checkout.Session;
+    if (!isPaidCheckoutEvent(event.type)) {
+      return NextResponse.json({ received: true }, { status: 200 });
+    }
 
-      const meta = (session.metadata || {}) as Record<string, string>;
-      const invoiceId = meta.invoice_id || meta.tech_invoice_id || "";
+    const session = event.data.object as Stripe.Checkout.Session;
+    const meta = (session.metadata || {}) as Record<string, string>;
+    const paymentStatus = String(session.payment_status || "").toLowerCase();
 
-      if (!invoiceId) {
-        console.warn(`${event.type} without invoice_id metadata`, {
+    if (paymentStatus !== "paid") {
+      return NextResponse.json({ received: true, notPaid: true }, { status: 200 });
+    }
+
+    const paymentIntentId =
+      typeof session.payment_intent === "string" ? session.payment_intent : null;
+
+    const amountTotal = session.amount_total ?? null;
+    const amountDiscount = session.total_details?.amount_discount ?? null;
+    const paidAt = new Date().toISOString();
+
+    /*
+    =========================================================
+    DEPOSIT HANDLING
+    =========================================================
+    */
+    if (isDepositSession(meta)) {
+      const depositId = meta.deposit_request_id || meta.deposit_id || "";
+      const appointmentId = meta.appointment_id || "";
+
+      if (!depositId) {
+        console.warn("Paid deposit checkout missing deposit_request_id metadata", {
           sessionId: session.id,
+          metadata: meta,
         });
-        return NextResponse.json({ received: true }, { status: 200 });
-      }
 
-      // ✅ Only mark paid when Stripe confirms paid
-      const paymentStatus = String(session.payment_status || "").toLowerCase();
-      if (paymentStatus !== "paid") {
-        console.warn("Checkout session not paid yet", {
-          invoiceId,
-          sessionId: session.id,
-          payment_status: session.payment_status,
-          eventType: event.type,
-        });
         return NextResponse.json(
-          { received: true, notPaid: true },
+          { received: true, depositUpdated: false, reason: "missing_deposit_request_id" },
           { status: 200 }
         );
       }
 
-      // Helpful promo info if stored in metadata at checkout creation
-      const promoCode = meta.promo_code || "";
-      const promoId = meta.stripe_promotion_code_id || "";
-
-      // Amounts (Stripe sends totals in cents)
-      const amountTotal = session.amount_total ?? null; // total charged
-      const amountDiscount = session.total_details?.amount_discount ?? null;
-
-      const paymentIntentId =
-        typeof session.payment_intent === "string" ? session.payment_intent : null;
-
-      // ✅ Idempotency: if already paid, do nothing
-      const { data: existing, error: fetchErr } = await supabaseAdmin
-        .from("tech_invoices")
-        .select("id,status")
-        .eq("id", invoiceId)
+      const { data: existingDeposit, error: depositFetchErr } = await supabaseAdmin
+        .from("deposit_requests")
+        .select("*")
+        .eq("id", depositId)
         .maybeSingle();
 
-      if (fetchErr) {
-        console.error("Supabase fetch tech_invoice error:", fetchErr);
-        return NextResponse.json(
-          { received: true, dbUpdated: false },
-          { status: 200 }
-        );
-      }
-      if (!existing) {
-        console.warn("tech_invoices row not found for invoiceId:", invoiceId);
-        return NextResponse.json(
-          { received: true, dbUpdated: false },
-          { status: 200 }
-        );
-      }
-      if (String(existing.status || "").toLowerCase() === "paid") {
-        return NextResponse.json(
-          { received: true, dbUpdated: true, alreadyPaid: true },
-          { status: 200 }
-        );
+      if (depositFetchErr) {
+        console.error("Deposit fetch error:", depositFetchErr);
+        return NextResponse.json({ received: true, depositUpdated: false }, { status: 200 });
       }
 
-      // ✅ Update invoice → paid + store final numbers + promo data
-      // (Requires SQL columns: paid_at, stripe_checkout_session_id, etc.)
-      const updatePayload: Record<string, any> = {
-        status: "paid",
-        payment_method: "stripe",
-        paid_at: new Date().toISOString(),
-        stripe_checkout_session_id: session.id,
-        stripe_payment_intent_id: paymentIntentId,
-        final_paid_cents: amountTotal,
-        promo_code: promoCode || null,
-        stripe_promotion_code_id: promoId || null,
-        promo_discount_cents: amountDiscount,
-        payment_note: `Stripe Checkout paid | session=${session.id}${
-          paymentIntentId ? ` | pi=${paymentIntentId}` : ""
-        }`,
-      };
+      if (!existingDeposit) {
+        console.warn("Deposit not found:", depositId);
+        return NextResponse.json({ received: true, depositUpdated: false }, { status: 200 });
+      }
 
-      const { error: updateErr } = await supabaseAdmin
-        .from("tech_invoices")
-        .update(updatePayload)
-        .eq("id", invoiceId);
+      const finalAppointmentId = existingDeposit.appointment_id || appointmentId || null;
+      const depositCents = Number(existingDeposit.amount_cents || amountTotal || 2000);
 
-      if (updateErr) {
-        console.error("Supabase update invoice paid error:", updateErr);
-        // Return 200 so Stripe doesn't retry storm if DB rejected temporarily
-        return NextResponse.json(
-          { received: true, dbUpdated: false },
-          { status: 200 }
-        );
+      const { error: depositErr } = await supabaseAdmin
+        .from("deposit_requests")
+        .update({
+          status: "paid",
+          paid_at: paidAt,
+          updated_at: paidAt,
+          stripe_checkout_session_id: session.id,
+          stripe_payment_intent_id: paymentIntentId,
+          payment_status: "paid",
+          amount_paid_cents: amountTotal,
+        })
+        .eq("id", depositId);
+
+      if (depositErr) {
+        console.error("Deposit update error:", depositErr);
+        return NextResponse.json({ received: true, depositUpdated: false }, { status: 200 });
+      }
+
+      if (finalAppointmentId) {
+        const { error: appointmentErr } = await supabaseAdmin
+          .from("appointments")
+          .update({
+            deposit_request_id: depositId,
+            deposit_cents: depositCents,
+            deposit_status: "paid",
+            deposit_paid_at: paidAt,
+          })
+          .eq("id", finalAppointmentId);
+
+        if (appointmentErr) {
+          console.error("Appointment deposit sync error:", appointmentErr);
+        }
       }
 
       return NextResponse.json(
-        { received: true, dbUpdated: true },
+        { received: true, depositUpdated: true, depositId },
         { status: 200 }
       );
     }
 
-    // Ignore other events
-    return NextResponse.json({ received: true }, { status: 200 });
+    /*
+    =========================================================
+    EXISTING INVOICE LOGIC
+    =========================================================
+    */
+    const invoiceId = meta.invoice_id || meta.tech_invoice_id || "";
+
+    if (!invoiceId) {
+      console.warn(`${event.type} without invoice_id metadata`, {
+        sessionId: session.id,
+        metadata: meta,
+      });
+
+      return NextResponse.json({ received: true }, { status: 200 });
+    }
+
+    const promoCode = meta.promo_code || "";
+    const promoId = meta.stripe_promotion_code_id || "";
+
+    const { data: existing, error: fetchErr } = await supabaseAdmin
+      .from("tech_invoices")
+      .select("id,status")
+      .eq("id", invoiceId)
+      .maybeSingle();
+
+    if (fetchErr) {
+      console.error("Supabase fetch tech_invoice error:", fetchErr);
+      return NextResponse.json({ received: true, dbUpdated: false }, { status: 200 });
+    }
+
+    if (!existing) {
+      console.warn("tech_invoices row not found:", invoiceId);
+      return NextResponse.json({ received: true, dbUpdated: false }, { status: 200 });
+    }
+
+    if (String(existing.status || "").toLowerCase() === "paid") {
+      return NextResponse.json(
+        { received: true, dbUpdated: true, alreadyPaid: true },
+        { status: 200 }
+      );
+    }
+
+    const updatePayload: Record<string, any> = {
+      status: "paid",
+      payment_method: "stripe",
+      paid_at: paidAt,
+      stripe_checkout_session_id: session.id,
+      stripe_payment_intent_id: paymentIntentId,
+      final_paid_cents: amountTotal,
+      promo_code: promoCode || null,
+      stripe_promotion_code_id: promoId || null,
+      promo_discount_cents: amountDiscount,
+      payment_note: `Stripe Checkout paid | session=${session.id}${
+        paymentIntentId ? ` | pi=${paymentIntentId}` : ""
+      }`,
+    };
+
+    const { error: updateErr } = await supabaseAdmin
+      .from("tech_invoices")
+      .update(updatePayload)
+      .eq("id", invoiceId);
+
+    if (updateErr) {
+      console.error("Invoice update error:", updateErr);
+    }
+
+    return NextResponse.json({ received: true, dbUpdated: true }, { status: 200 });
   } catch (err: any) {
     console.error("Webhook handler error:", err);
     return NextResponse.json({ error: "Webhook handler failed" }, { status: 500 });

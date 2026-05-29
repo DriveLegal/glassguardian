@@ -1,6 +1,7 @@
 // app/api/tech/profile/ensure/route.ts
 import "server-only";
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -8,7 +9,7 @@ import { createClient } from "@supabase/supabase-js";
 type AnyObj = Record<string, any>;
 
 function getAdminClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!supabaseUrl || !serviceRoleKey) {
@@ -27,11 +28,31 @@ function isTechRole(role: any) {
   return r === "tech" || r === "technician";
 }
 
+function normalizeEmail(v: any) {
+  const s = String(v ?? "").trim().toLowerCase();
+  return s && s !== "null" && s !== "undefined" ? s : "";
+}
+
+function cleanName(v: any) {
+  const s = String(v ?? "").replace(/\s+/g, " ").trim();
+  return s.length ? s.slice(0, 120) : "";
+}
+
+function fallbackNameFromEmail(email: string) {
+  const base = (email.split("@")[0] || "Tech").replace(/[._-]+/g, " ").trim();
+  const titled = base
+    .split(" ")
+    .filter(Boolean)
+    .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+    .join(" ");
+  return titled || "Technician";
+}
+
 async function getUserFromToken(req: Request) {
   const admin = getAdminClient();
 
-  const authz = req.headers.get("authorization") || req.headers.get("Authorization");
-  const token = authz?.startsWith("Bearer ") ? authz.slice(7) : null;
+  const authz = req.headers.get("authorization") || req.headers.get("Authorization") || "";
+  const token = authz?.startsWith("Bearer ") ? authz.slice(7).trim() : "";
 
   if (!token) return { ok: false as const, reason: "Missing bearer token" };
 
@@ -53,10 +74,19 @@ export async function POST(req: Request) {
 
     const { user, admin } = auth;
 
-    const email = String(user.email || "").trim().toLowerCase();
+    const email = normalizeEmail(user.email);
+    const auth_user_id = String(user.id || "").trim();
+
     if (!email) {
       return NextResponse.json(
         { error: "User email missing on auth profile" },
+        { status: 400 }
+      );
+    }
+
+    if (!auth_user_id) {
+      return NextResponse.json(
+        { error: "User id missing on auth profile" },
         { status: 400 }
       );
     }
@@ -74,14 +104,15 @@ export async function POST(req: Request) {
       );
     }
 
-    const full_name = String(meta.full_name || meta.name || email || "Technician");
-    const phone = meta.phone ? String(meta.phone) : null;
+    // ✅ Only used to FILL missing values — not overwrite
+    const desiredFullName =
+      cleanName(meta.full_name || meta.name) || fallbackNameFromEmail(email);
 
-    // Look for existing
+    // Look for existing row by auth_user_id OR email
     const { data: existing, error: selErr } = await admin
       .from("technicians")
-      .select("id")
-      .eq("email", email)
+      .select("id, email, auth_user_id, full_name, phone, is_active")
+      .or(`auth_user_id.eq.${auth_user_id},email.ilike.${email}`)
       .maybeSingle();
 
     if (selErr) {
@@ -91,10 +122,33 @@ export async function POST(req: Request) {
       );
     }
 
+    const now = new Date().toISOString();
+
+    // ✅ If exists: update ONLY safe fields and ONLY when missing
     if (existing?.id) {
+      const patch: AnyObj = {
+        // keep the row linked correctly
+        is_active: true,
+        updated_at: now,
+      };
+
+      // Fill missing auth_user_id (helps uid-based policies)
+      if (!existing.auth_user_id) patch.auth_user_id = auth_user_id;
+
+      // Fill missing/blank email (rare)
+      if (!existing.email) patch.email = email;
+
+      // Fill missing/blank full_name only
+      if (!existing.full_name || String(existing.full_name).trim().length < 2) {
+        patch.full_name = desiredFullName;
+      }
+
+      // ✅ CRITICAL: never overwrite phone here
+      // patch.phone = ... NOPE
+
       const { error: updErr } = await admin
         .from("technicians")
-        .update({ full_name, phone, is_active: true })
+        .update(patch)
         .eq("id", existing.id);
 
       if (updErr) {
@@ -104,18 +158,24 @@ export async function POST(req: Request) {
         );
       }
 
-      return NextResponse.json({ ok: true, mode: "updated", technician_id: existing.id });
+      return NextResponse.json({
+        ok: true,
+        mode: "updated",
+        technician_id: existing.id,
+      });
     }
 
-    // Insert
+    // ✅ Insert: must satisfy NOT NULL full_name. DO NOT set phone from metadata.
     const { data: inserted, error: insErr } = await admin
       .from("technicians")
       .insert({
         email,
-        full_name,
-        phone,
+        auth_user_id,
+        full_name: desiredFullName,
         is_active: true,
         tech_rating: 5.0,
+        created_at: now,
+        updated_at: now,
       })
       .select("id")
       .single();
@@ -127,7 +187,11 @@ export async function POST(req: Request) {
       );
     }
 
-    return NextResponse.json({ ok: true, mode: "inserted", technician_id: inserted.id });
+    return NextResponse.json({
+      ok: true,
+      mode: "inserted",
+      technician_id: inserted.id,
+    });
   } catch (err: any) {
     console.error("Error in /api/tech/profile/ensure:", err);
     return NextResponse.json(

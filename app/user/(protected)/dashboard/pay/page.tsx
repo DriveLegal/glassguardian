@@ -82,7 +82,7 @@ export default function UserPayListPage() {
           "id, invoice_number, invoice_date, status, total_cents, customer_email"
         )
         // Only invoices associated with this user's email
-        .ilike("customer_email", normalizedEmail)
+        .eq("customer_email", normalizedEmail)
         // 🔐 Only show invoices that have been sent (or later):
         //    - status must NOT be null
         //    - status must NOT be 'draft' or 'created'

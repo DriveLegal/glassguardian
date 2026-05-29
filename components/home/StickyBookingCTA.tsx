@@ -1,18 +1,25 @@
-// components/home/StickyBookingCTA.tsx
 "use client";
 
 import * as React from "react";
 import s from "./StickyBookingCTA.module.css";
 import { supabaseClient } from "@/lib/supabaseClient";
 
+function ShieldMiniIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...props}>
+      <path d="M12 2l7 4v6c0 5-3.5 9.5-7 10-3.5-.5-7-5-7-10V6l7-4z" />
+    </svg>
+  );
+}
+
 export default function StickyBookingCTA({
-  revealOffset = 0, // show as soon as you scroll past this
+  revealOffset = 0,
   hideOverFooter = true,
   message = "Chip spreading? We can fix it today.",
   ctaLabel = "Book repair",
   subLabel = "Mobile • Insurance-friendly • 1-yr warranty",
   tel = "+1-909-529-1798",
-  showBar = true, // allow hiding the sticky footer bar
+  showBar = true,
 }: {
   revealOffset?: number;
   hideOverFooter?: boolean;
@@ -22,22 +29,18 @@ export default function StickyBookingCTA({
   tel?: string;
   showBar?: boolean;
 }) {
-  // visibility and panel state
   const [visible, setVisible] = React.useState(true);
   const [open, setOpen] = React.useState(false);
 
-  // celebration state
   const [celebrate, setCelebrate] = React.useState(false);
   const confettiRef = React.useRef<HTMLCanvasElement | null>(null);
   const confettiRAF = React.useRef<number | null>(null);
 
-  // 🔹 Listen for global "open booking" command dispatched from the page
   React.useEffect(() => {
     const handleOpen = () => {
-      setVisible(true); // ensure bar can be visible
-      setOpen(true); // open the panel
-      // focus first input for smoother UX
-      setTimeout(() => {
+      setVisible(true);
+      setOpen(true);
+      window.setTimeout(() => {
         const el = document.getElementById("gg-name") as HTMLInputElement | null;
         el?.focus();
       }, 50);
@@ -48,7 +51,6 @@ export default function StickyBookingCTA({
     return () => window.removeEventListener("gg:open-booking", handleOpen);
   }, []);
 
-  // keep bar visible once scrolled past offset (only matters if showBar / revealOffset > 0)
   React.useEffect(() => {
     if (!showBar && revealOffset <= 0) return;
 
@@ -56,12 +58,12 @@ export default function StickyBookingCTA({
       const y = window.scrollY || document.documentElement.scrollTop || 0;
       if (y > revealOffset) setVisible(true);
     };
+
     onScroll();
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, [revealOffset, showBar]);
 
-  // auto-hide bottom bar when footer is fully in view on tall pages
   React.useEffect(() => {
     if (!hideOverFooter || !showBar) return;
 
@@ -75,20 +77,70 @@ export default function StickyBookingCTA({
       (entries) => {
         const e = entries[0];
         if (!e) return;
-        if (!isTall()) return; // never hide on short pages
+        if (!isTall()) return;
         if ((e.intersectionRatio ?? 0) >= 0.98) setVisible(false);
         else setVisible(true);
       },
       { threshold: [0.2, 0.6, 0.98] }
     );
+
     io.observe(footer);
     return () => io.disconnect();
   }, [hideOverFooter, showBar]);
 
-  // form state
+  const [vh, setVh] = React.useState<number>(
+    typeof window !== "undefined" ? window.innerHeight : 800
+  );
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    let raf = 0;
+    const update = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => setVh(window.innerHeight));
+    };
+
+    update();
+    window.addEventListener("resize", update, {
+      passive: true,
+    } as EventListenerOptions);
+
+    const vv = (window as any).visualViewport as VisualViewport | undefined;
+    vv?.addEventListener?.("resize", update, {
+      passive: true,
+    } as EventListenerOptions);
+    vv?.addEventListener?.("scroll", update, {
+      passive: true,
+    } as EventListenerOptions);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", update as EventListener);
+      vv?.removeEventListener?.("resize", update as EventListener);
+      vv?.removeEventListener?.("scroll", update as EventListener);
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (!open) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [open]);
+
   const [fullName, setFullName] = React.useState("");
   const [phone, setPhone] = React.useState("");
-  const [zip, setZip] = React.useState("");
   const [chips, setChips] = React.useState<number | "">("");
   const [file, setFile] = React.useState<File | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
@@ -96,12 +148,12 @@ export default function StickyBookingCTA({
   const [error, setError] = React.useState<string | null>(null);
 
   const telHref = `tel:${tel.replace(/[^+\d]/g, "")}`;
-  const showToast = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 1800);
-  };
 
-  // simple confetti burst near bottom-right
+  const showToast = React.useCallback((msg: string) => {
+    setToast(msg);
+    window.setTimeout(() => setToast(null), 1800);
+  }, []);
+
   const runConfetti = React.useCallback(() => {
     const canvas = confettiRef.current;
     if (!canvas) return;
@@ -110,8 +162,9 @@ export default function StickyBookingCTA({
     if (!ctx) return;
 
     const DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-    const W = 260,
-      H = 180; // small canvas, bottom-right
+    const W = 260;
+    const H = 180;
+
     canvas.width = Math.floor(W * DPR);
     canvas.height = Math.floor(H * DPR);
     canvas.style.width = `${W}px`;
@@ -131,12 +184,12 @@ export default function StickyBookingCTA({
       a: 1,
       color:
         i % 4 === 0
-          ? "#6EE7F9"
+          ? "#F5E7B8"
           : i % 4 === 1
-          ? "#93C5FD"
+          ? "#D6B25E"
           : i % 4 === 2
-          ? "#A78BFA"
-          : "#FDE68A",
+          ? "#FFF1C7"
+          : "#B38738",
     }));
 
     const start = performance.now();
@@ -185,28 +238,40 @@ export default function StickyBookingCTA({
   const onSubmit = async () => {
     setError(null);
 
-    // basic validation
-    if (!fullName.trim())
-      return setError("Please enter your first & last name.");
-    if (!phone.trim()) return setError("Please enter a phone number.");
-    if (!zip.trim()) return setError("Please enter your ZIP code.");
-    if (chips === "" || Number.isNaN(Number(chips)) || Number(chips) < 0)
-      return setError("Please enter how many chips (0 if unsure).");
+    if (!fullName.trim()) {
+      setError("Please enter your first & last name.");
+      return;
+    }
+
+    if (!phone.trim()) {
+      setError("Please enter a phone number.");
+      return;
+    }
+
+    if (chips === "" || Number.isNaN(Number(chips)) || Number(chips) < 0) {
+      setError("Please enter how many chips (0 if unsure).");
+      return;
+    }
 
     setSubmitting(true);
+
     try {
-      // 1) optional upload to storage bucket "leads"
       let photo_url: string | null = null;
+
       if (file) {
         const bucket = "leads";
-        const path = `lead_${Date.now()}_${file.name.replace(/\s+/g, "_")}`;
+        const safeName = file.name.replace(/\s+/g, "_");
+        const path = `lead_${Date.now()}_${safeName}`;
+
         const { error: upErr } = await supabaseClient.storage
           .from(bucket)
-          .upload(path, file, { cacheControl: "3600", upsert: false });
+          .upload(path, file, {
+            cacheControl: "3600",
+            upsert: false,
+          });
+
         if (!upErr) {
-          const { data } = supabaseClient.storage
-            .from(bucket)
-            .getPublicUrl(path);
+          const { data } = supabaseClient.storage.from(bucket).getPublicUrl(path);
           photo_url = data?.publicUrl ?? null;
         } else {
           console.warn("[lead-upload] storage error:", upErr.message);
@@ -214,13 +279,11 @@ export default function StickyBookingCTA({
         }
       }
 
-      // 2) insert into public.booking_leads
       const { error: insErr } = await supabaseClient.from("booking_leads").insert({
         full_name: fullName.trim(),
         phone: phone.trim(),
-        zip: zip.trim(),
         chips: Number(chips) || 0,
-        slot: null, // no slots UI
+        slot: null,
         photo_url,
         source: "sticky_cta",
       });
@@ -232,14 +295,17 @@ export default function StickyBookingCTA({
         return;
       }
 
-      // 3) success UX — close panel, fire confetti, show celebration note
       setOpen(false);
       setCelebrate(true);
-      // kick confetti after panel closes on next paint
+
       requestAnimationFrame(() => runConfetti());
-      // auto-hide celebration after a few seconds
-      setTimeout(() => setCelebrate(false), 7000);
-    } catch (e: any) {
+      window.setTimeout(() => setCelebrate(false), 7000);
+
+      setFullName("");
+      setPhone("");
+      setChips("");
+      setFile(null);
+    } catch (e) {
       console.error(e);
       setError("Unexpected error. Please try again.");
     } finally {
@@ -247,9 +313,14 @@ export default function StickyBookingCTA({
     }
   };
 
+  const fileInputId = "gg-file";
+  const selectedFileName = file?.name ? file.name : "No file selected";
+
+  const PANEL_GUTTER = 24;
+  const panelMaxHpx = Math.max(320, Math.floor(vh - PANEL_GUTTER));
+
   return (
     <>
-      {/* Full-width sticky bar across the bottom (can be turned off via showBar) */}
       {showBar && (
         <div
           aria-hidden={!visible}
@@ -265,143 +336,89 @@ export default function StickyBookingCTA({
             transition: "transform 300ms ease, opacity 250ms ease",
           }}
         >
-          <div
-            style={{
-              pointerEvents: "auto",
-              width: "100%",
-              margin: "0 auto",
-              padding: "10px 12px calc(10px + env(safe-area-inset-bottom))",
-              // glassy stretched bar
-              background:
-                "linear-gradient(180deg, rgba(255,255,255,0.26), rgba(255,255,255,0.16)), radial-gradient(1200px 420px at 20% -10%, rgba(96,165,250,0.18), transparent 60%)",
-              borderTop: "1px solid rgba(255,255,255,0.35)",
-              boxShadow: "0 -8px 20px rgba(0,0,0,0.15)",
-              backdropFilter: "blur(10px)",
-            }}
-          >
-            <div
-              style={{
-                maxWidth: 1200,
-                margin: "0 auto",
-                display: "flex",
-                flexWrap: "wrap",
-                gap: 10,
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}
-            >
-              {/* Copy */}
-              <div
-                style={{
-                  minWidth: 0,
-                  flex: "1 1 100%",
-                }}
-              >
-                <div
-                  style={{
-                    color: "var(--text, #0f172a)",
-                    fontWeight: 800,
-                    letterSpacing: "-0.01em",
-                    fontSize: "clamp(15px, 2.6vw, 18px)",
-                    lineHeight: 1.15,
-                    margin: "2px 0",
-                  }}
-                >
-                  {message}
-                </div>
-                <div
-                  style={{
-                    color: "var(--text, #0f172a)",
-                    opacity: 0.85,
-                    fontSize: "clamp(12px, 2.2vw, 13px)",
-                    lineHeight: 1.35,
-                    marginTop: 2,
-                  }}
-                >
-                  {subLabel}
-                </div>
+          <div className={s.barWrap}>
+            <div className={s.barInner}>
+              <div className={s.barCopy}>
+                <div className={s.barMessage}>{message}</div>
+                <div className={s.barSub}>{subLabel}</div>
               </div>
 
-              {/* Call / Text — high contrast */}
-              <a
-                href={telHref}
-                aria-label="Call or text now"
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  padding: "11px 14px",
-                  borderRadius: 12,
-                  fontWeight: 800,
-                  fontSize: 13,
-                  background:
-                    "linear-gradient(90deg, var(--accentA, #60a5fa), var(--accentB, #8b5cf6))",
-                  color: "#071124",
-                  border: "0",
-                  textDecoration: "none",
-                  whiteSpace: "nowrap",
-                  boxShadow: "0 6px 18px rgba(6,95,255,0.22)",
-                  flexShrink: 0,
-                }}
-              >
-                Call / Text
-              </a>
+              <div className={s.barActions}>
+                <a
+                  href={telHref}
+                  aria-label="Call or text now"
+                  className={s.barActionCall}
+                >
+                  Call / Text
+                </a>
 
-              {/* Book button */}
-              <button
-                onClick={() => setOpen(true)}
-                aria-label={`${ctaLabel}. Opens booking form`}
-                style={{
-                  appearance: "none",
-                  border: 0,
-                  cursor: "pointer",
-                  padding: "12px 16px",
-                  borderRadius: 12,
-                  fontWeight: 800,
-                  fontSize: 14,
-                  letterSpacing: "-0.01em",
-                  color: "#fff",
-                  background: "var(--accent, #2563eb)",
-                  boxShadow: "0 6px 14px rgba(37,99,235,0.35)",
-                  transition:
-                    "transform 120ms ease, box-shadow 160ms ease, filter 160ms ease",
-                  whiteSpace: "nowrap",
-                  flexShrink: 0,
-                }}
-              >
-                {ctaLabel}
-              </button>
+                <button
+                  onClick={() => setOpen(true)}
+                  aria-label={`${ctaLabel}. Opens booking form`}
+                  className={s.barActionBook}
+                >
+                  <ShieldMiniIcon className={s.barActionBookIcon} />
+                  <span>{ctaLabel}</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* Compact booking panel (used even if showBar = false) */}
+      {open && <div className={s.backdrop} onClick={() => setOpen(false)} aria-hidden />}
+
       {open && (
         <div
           className={s.panelWrapper}
           role="dialog"
           aria-modal="true"
+          aria-labelledby="gg-booking-title"
           id="gg-booking-panel"
           style={{
             width: "auto",
-            maxWidth: "min(420px, 100vw - 24px)", // mobile-safe
+            maxWidth: "min(430px, 100vw - 24px)",
+            maxHeight: `min(${panelMaxHpx}px, calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)))`,
           }}
         >
-          <div className={s.panelCard}>
+          <div
+            className={s.panelCard}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              maxHeight: `min(${panelMaxHpx}px, calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)))`,
+              minHeight: 0,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className={s.grab} aria-hidden />
-            <header className={s.panelHeader}>
+
+            <header
+              className={s.panelHeader}
+              style={{
+                flex: "0 0 auto",
+                minHeight: 0,
+              }}
+            >
               <div>
-                <h3 className="title" style={{ margin: 0 }}>
-                  Book a mobile repair
-                </h3>
+                <div className={s.titleRow}>
+                  <span className={s.titleBadge} aria-hidden="true">
+                    <ShieldMiniIcon className={s.titleBadgeIcon} />
+                  </span>
+                  <h3 id="gg-booking-title" className={s.title}>
+                    Book a mobile repair
+                  </h3>
+                </div>
+
                 <div className={s.subtitle}>
                   <span>{message}</span>
                   <span className={s.sep}>•</span>
-                  <span className={s.eta}>~20–40 mins on site</span>
+                  <span className={s.eta}>15-30 mins on site</span>
                 </div>
               </div>
+
               <button
+                type="button"
                 className={s.closeBtn}
                 onClick={() => setOpen(false)}
                 aria-label="Close panel"
@@ -410,8 +427,17 @@ export default function StickyBookingCTA({
               </button>
             </header>
 
-            <div className={s.panelBody}>
-              {/* Form fields */}
+            <div
+              className={s.panelBody}
+              style={{
+                flex: "1 1 auto",
+                minHeight: 0,
+                overflowY: "auto",
+                overflowX: "hidden",
+                WebkitOverflowScrolling: "touch",
+                paddingBottom: "calc(14px + env(safe-area-inset-bottom))",
+              }}
+            >
               <div className={s.field}>
                 <label className={s.fieldLabel} htmlFor="gg-name">
                   First &amp; last name
@@ -442,21 +468,6 @@ export default function StickyBookingCTA({
               </div>
 
               <div className={s.field}>
-                <label className={s.fieldLabel} htmlFor="gg-zip">
-                  ZIP code
-                </label>
-                <input
-                  id="gg-zip"
-                  className={s.input}
-                  value={zip}
-                  onChange={(e) => setZip(e.target.value)}
-                  placeholder="e.g., 92376"
-                  inputMode="numeric"
-                  autoComplete="postal-code"
-                />
-              </div>
-
-              <div className={s.field}>
                 <label className={s.fieldLabel} htmlFor="gg-chips">
                   How many chips?
                 </label>
@@ -466,7 +477,10 @@ export default function StickyBookingCTA({
                   value={chips}
                   onChange={(e) => {
                     const v = e.target.value;
-                    if (v === "") return setChips("");
+                    if (v === "") {
+                      setChips("");
+                      return;
+                    }
                     const n = Number(v.replace(/[^\d]/g, ""));
                     setChips(Number.isNaN(n) ? "" : n);
                   }}
@@ -476,27 +490,57 @@ export default function StickyBookingCTA({
               </div>
 
               <div className={s.field}>
-                <label className={s.fieldLabel} htmlFor="gg-file">
+                <label className={s.fieldLabel} htmlFor={fileInputId}>
                   Picture (optional)
                 </label>
-                <input
-                  id="gg-file"
-                  className="inputFile"
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-                />
-                <div className="fileInfo">
+
+                <div className={s.filePickerRow}>
+                  <input
+                    id={fileInputId}
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                    className={s.fileInputHidden}
+                  />
+
+                  <label
+                    htmlFor={fileInputId}
+                    className={s.fileButton}
+                    aria-label="Choose a picture"
+                  >
+                    Choose file
+                  </label>
+
+                  <div
+                    className={s.fileName}
+                    aria-live="polite"
+                    title={file?.name || undefined}
+                  >
+                    <span className={s.fileNameStrong}>{selectedFileName}</span>
+                  </div>
+
+                  {file && (
+                    <button
+                      type="button"
+                      onClick={() => setFile(null)}
+                      className={s.fileRemove}
+                      aria-label="Remove selected file"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+
+                <div className={s.fileInfo}>
                   Clear close-up of the chip helps us plan the repair.
                 </div>
               </div>
 
-              {/* Form feedback */}
-              {error && <div className="error">{error}</div>}
+              {error && <div className={s.error}>{error}</div>}
 
-              {/* Actions */}
               <div className={s.actions}>
                 <button
+                  type="button"
                   className={s.primary}
                   onClick={onSubmit}
                   disabled={submitting}
@@ -505,28 +549,27 @@ export default function StickyBookingCTA({
                   {submitting ? "Sending…" : "Send & Continue"}
                 </button>
 
-                <div
-                  className="quickActions"
-                  style={{ display: "flex", gap: 8, marginLeft: "auto" }}
-                >
-                  <a className="quick" href={telHref}>
+                <div className={s.quickActions}>
+                  <a className={s.quick} href={telHref}>
                     Call now
                   </a>
-                  <button className="quick" onClick={() => setOpen(false)}>
+                  <button
+                    type="button"
+                    className={s.quick}
+                    onClick={() => setOpen(false)}
+                  >
                     Close
                   </button>
                 </div>
               </div>
 
-              <div className="smallNote">
-                <small>
-                  We’ll text to confirm. <a href="#terms">Terms</a>
-                </small>
+              <div className={s.smallNote}>
+                <small>We’ll text to confirm.</small>
               </div>
 
               <footer className={s.panelFooter}>
                 <div className={s.trust}>
-                  <svg className={s.trustIcon} viewBox="0 0 24 24" aria-hidden>
+                  <svg className={s.trustIcon} viewBox="0 0 24 24" aria-hidden="true">
                     <path d="M12 2l7 4v6c0 5-3.5 9.5-7 10-3.5-.5-7-5-7-10V6l7-4z" />
                   </svg>
                   <span>1-yr warranty against spread on repaired spot</span>
@@ -537,13 +580,12 @@ export default function StickyBookingCTA({
         </div>
       )}
 
-      {/* Celebration bubble (bottom-right, above sticky bar) */}
       {celebrate && (
         <div
           style={{
             position: "fixed",
             right: 16,
-            bottom: showBar ? 88 : 24, // if no bar, sit a bit lower
+            bottom: showBar ? 92 : 24,
             zIndex: 1700,
             display: "grid",
             gap: 8,
@@ -563,38 +605,14 @@ export default function StickyBookingCTA({
             }}
             aria-hidden
           />
-          <div
-            style={{
-              pointerEvents: "auto",
-              maxWidth: 360,
-              background:
-                "linear-gradient(180deg, rgba(255,255,255,0.95), rgba(255,255,255,0.90))",
-              color: "#0f172a",
-              borderRadius: 12,
-              padding: "10px 12px",
-              boxShadow: "0 10px 28px rgba(0,0,0,0.18)",
-              border: "1px solid rgba(0,0,0,0.06)",
-              fontSize: 14,
-              fontWeight: 600,
-            }}
-          >
+
+          <div className={s.successBubble}>
             Request received! We’ll contact you ASAP. If urgent, please call{" "}
-            <a
-              href={telHref}
-              style={{
-                fontWeight: 900,
-                textDecoration: "underline",
-                color: "#0f172a",
-              }}
-            >
-              HERE
-            </a>
-            .
+            <a href={telHref}>HERE</a>.
           </div>
         </div>
       )}
 
-      {/* Toast */}
       {toast && (
         <div className={s.toast} role="status" aria-live="polite">
           {toast}

@@ -13,7 +13,6 @@ import {
   Calendar,
   ArrowRight,
   PlusCircle,
-  Shield,
   Eye,
   Send,
 } from "lucide-react";
@@ -98,8 +97,6 @@ function normEmail(v: any) {
   return String(v ?? "").trim().toLowerCase();
 }
 
-// Escape special characters for ILIKE patterns (% and _)
-// We use exact-match ILIKE (no wildcards), but escaping is still good hygiene.
 function escapeForIlikeExact(v: string) {
   return v.replace(/[%_\\]/g, (m) => `\\${m}`);
 }
@@ -130,7 +127,7 @@ export default function TechUsersPage() {
   // track which invite is resending
   const [resendBusyId, setResendBusyId] = React.useState<string | null>(null);
 
-  // premium toast
+  // toast
   const [toast, setToast] = React.useState<TechToastState>({
     open: false,
     title: "",
@@ -177,13 +174,11 @@ export default function TechUsersPage() {
     queryKey: ["tech:users:list", techEmail],
     enabled: !!techEmail,
 
-    // keep it fresh
     staleTime: 0,
     refetchOnMount: "always",
     refetchOnWindowFocus: true,
 
     queryFn: async () => {
-      // 1) Fetch invites created by this tech
       const { data: inviteRows, error: invErr } = await supabaseClient
         .from("user_invites")
         .select("id, full_name, email, phone, code, created_at, used_at")
@@ -195,22 +190,16 @@ export default function TechUsersPage() {
       const baseInvites = (inviteRows ?? []) as UserInvite[];
       if (!baseInvites.length) return baseInvites;
 
-      // 2) Build unique emails
       const emails = Array.from(
         new Set(baseInvites.map((u) => normEmail(u.email)).filter(Boolean))
       );
-
       if (!emails.length) return baseInvites;
 
-      // 3) Fetch app_users rows by email (case-insensitive)
-      // PostgREST `in(email, ...)` is case-sensitive, so we use OR with ILIKE exact-match.
-      // Chunk to avoid URL length limits.
       const CHUNK = 40;
       const nameByEmail = new Map<string, string>();
 
       for (let i = 0; i < emails.length; i += CHUNK) {
         const slice = emails.slice(i, i + CHUNK);
-
         const orFilter = slice
           .map((e) => `email.ilike.${escapeForIlikeExact(e)}`)
           .join(",");
@@ -220,12 +209,7 @@ export default function TechUsersPage() {
           .select("email, full_name")
           .or(orFilter);
 
-        // If this errors (likely RLS), just stop trying and fall back.
-        if (auErr) {
-          // Optional debug:
-          // console.warn("app_users hydrate blocked or failed:", auErr.message);
-          return baseInvites;
-        }
+        if (auErr) return baseInvites;
 
         for (const r of (appUsers ?? []) as any[]) {
           const e = normEmail(r?.email);
@@ -234,7 +218,6 @@ export default function TechUsersPage() {
         }
       }
 
-      // 4) Override invite.full_name if app_users has a better one
       return baseInvites.map((u) => {
         const e = normEmail(u.email);
         const betterName = e ? nameByEmail.get(e) : undefined;
@@ -244,13 +227,6 @@ export default function TechUsersPage() {
   });
 
   /* --------------------------- Derived stats + filters --------------------------- */
-
-  const { totalUsers, activeUsers, pendingUsers } = React.useMemo(() => {
-    const total = invites.length;
-    const active = invites.filter((u) => u.used_at !== null).length;
-    const pending = total - active;
-    return { totalUsers: total, activeUsers: active, pendingUsers: pending };
-  }, [invites]);
 
   const filteredInvites = React.useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -295,8 +271,6 @@ export default function TechUsersPage() {
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || "Failed to create user");
 
-      const userCode = json?.user_code as string | undefined;
-
       setUserOpen(false);
       setUserForm({ full_name: "", email: "", phone: "" });
 
@@ -306,9 +280,7 @@ export default function TechUsersPage() {
         open: true,
         variant: "success",
         title: "Invite created",
-        message: userCode
-          ? `Customer invite sent. Code: ${userCode}`
-          : "Customer invite created and emailed successfully.",
+        message: "Customer invite created and emailed successfully.",
       });
     } catch (e: any) {
       setUserErr(e?.message || "Failed to create user");
@@ -333,6 +305,7 @@ export default function TechUsersPage() {
       const token = s?.session?.access_token;
       if (!token) throw new Error("Not signed in.");
 
+      // ✅ FIX: API expects { action:"resend", invite_id }
       const res = await fetch("/api/tech/users", {
         method: "POST",
         headers: {
@@ -340,8 +313,7 @@ export default function TechUsersPage() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          mode: "resend_invite",
-          email: u.email,
+          action: "resend",
           invite_id: u.id,
         }),
       });
@@ -426,7 +398,6 @@ export default function TechUsersPage() {
         </div>
       </GlassPanel>
 
-      {/* Controls row */}
       <div className="flex flex-col md:flex-row gap-4 md:items-center md:justify-between">
         <div className="relative w-full md:w-80">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
@@ -462,7 +433,6 @@ export default function TechUsersPage() {
         </div>
       </div>
 
-      {/* List */}
       <GlassPanel className="p-4 md:p-5">
         {isLoading ? (
           <div className="py-12 text-center text-slate-400 text-sm">
@@ -597,7 +567,6 @@ export default function TechUsersPage() {
         )}
       </GlassPanel>
 
-      {/* Create User Modal */}
       <Dialog open={userOpen} onOpenChange={setUserOpen}>
         <DialogContent className="max-w-md bg-slate-950 border-slate-700 text-slate-50">
           <DialogHeader>
@@ -660,8 +629,7 @@ export default function TechUsersPage() {
             </div>
 
             <p className="text-xs text-slate-400">
-              You can invite customers even if they don&apos;t have an account yet — we
-              link by email later.
+              You can invite customers even if they don&apos;t have an account yet — we link by email later.
             </p>
           </div>
 

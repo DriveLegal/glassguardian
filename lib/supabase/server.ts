@@ -1,3 +1,4 @@
+// lib/supabase/server.ts
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 
@@ -16,7 +17,10 @@ export async function createSupabaseServer() {
         return cookieStore.getAll();
       },
       setAll(cookiesToSet) {
-        // In Server Components, setAll may be blocked during render. Middleware handles refresh safely.
+        /**
+         * In Server Components, setAll may be blocked during render.
+         * Middleware is the most reliable place to refresh/set auth cookies.
+         */
         try {
           cookiesToSet.forEach(({ name, value, options }) => {
             cookieStore.set(name, value, options);

@@ -1,4 +1,3 @@
-// components/tech/schedule/waiver/WaiverGate.tsx
 "use client";
 
 import * as React from "react";
@@ -57,14 +56,12 @@ function safeDateOnly(v: any): string | null {
   const s = String(v);
   if (s.includes("T")) return s.split("T")[0];
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  // try parse
   const d = new Date(s);
   if (!Number.isNaN(d.getTime())) return d.toISOString().split("T")[0];
   return null;
 }
 
 function formatNiceDate(yyyyMmDd: string) {
-  // yyyy-mm-dd -> "Jan 24, 2026" (local)
   const [y, m, d] = yyyyMmDd.split("-").map((x) => Number(x));
   const dt = new Date(y, (m || 1) - 1, d || 1, 12, 0, 0);
   return dt.toLocaleDateString(undefined, {
@@ -74,17 +71,6 @@ function formatNiceDate(yyyyMmDd: string) {
   });
 }
 
-/**
- * ✅ Rule requested:
- * - User can PREP/sign ahead of time (draft saved locally)
- * - BUT the waiver can only be SUBMITTED (i.e. actually signed in DB) on the service day.
- * - "Be mindful of time": service day is determined in the viewer's local timezone as:
- *    startOfDay(serviceDate) <= now <= endOfDay(serviceDate)
- *
- * Service day is taken from:
- * 1) appointment.actual_start_time date (if present)
- * 2) appointment.scheduled_date date
- */
 function getServiceDayInfo(appt: any) {
   const actualDay = safeDateOnly(appt?.actual_start_time);
   const scheduledDay = safeDateOnly(appt?.scheduled_date);
@@ -93,7 +79,7 @@ function getServiceDayInfo(appt: any) {
   if (!serviceDay) {
     return {
       serviceDay: null as string | null,
-      isServiceDay: true, // if we don't know, don't block hard
+      isServiceDay: true,
       label: "today",
       reason: null as string | null,
     };
@@ -157,7 +143,7 @@ type WaiverDraft = {
   name: string;
   initials: string;
   signature: string | null;
-  savedAt: string; // ISO
+  savedAt: string;
 };
 
 function loadDraft(apptId: string): WaiverDraft | null {
@@ -199,12 +185,6 @@ export default function WaiverGate(props: {
   open: boolean;
   onOpenChangeAction: (v: boolean) => void;
   onSatisfiedAction: () => void;
-  /**
-   * ✅ NEW:
-   * - "tech": old behavior + portal option
-   * - "user": shows waiver in user portal + allows saving draft ahead of time
-   *           but only allows SUBMIT on service day
-   */
   viewerRole?: ViewerRole;
 }) {
   const {
@@ -218,7 +198,6 @@ export default function WaiverGate(props: {
   const qc = useQueryClient();
 
   const [mode, setMode] = useState<"device" | "portal">("device");
-
   const [name, setName] = useState("");
   const [initials, setInitials] = useState("");
   const [signature, setSignature] = useState<string | null>(null);
@@ -227,11 +206,12 @@ export default function WaiverGate(props: {
   const [toast, setToast] = useState<string | null>(null);
 
   const waiverText = useMemo(() => buildWaiverText(appointment), [appointment]);
-
   const serviceDayInfo = useMemo(() => getServiceDayInfo(appointment), [appointment]);
 
-  // ✅ Allow pre-signing UX, but enforce "submit on service day"
-  const canSubmitToday = serviceDayInfo.isServiceDay;
+  // ✅ FIX: Tech-side device signing should NOT be blocked by "service day" logic.
+  // The service-day restriction is only meaningful for user portal signing.
+  const canSubmitToday =
+    viewerRole === "tech" ? true : Boolean(serviceDayInfo.isServiceDay);
 
   const { data: waiver } = useQuery({
     queryKey: ["appointment-waiver", appointment?.id],
@@ -249,22 +229,16 @@ export default function WaiverGate(props: {
 
   const waiverSigned = !!waiver;
 
-  // ✅ If it's already signed, satisfy parent immediately (avoids "signed but still locked" moments)
   useEffect(() => {
-    if (open && waiverSigned) {
-      onSatisfiedAction();
-    }
+    if (open && waiverSigned) onSatisfiedAction();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, waiverSigned]);
 
-  // ✅ Load draft when opened (user flow)
   useEffect(() => {
     if (!open) return;
     if (!appointment?.id) return;
 
     setError(null);
-
-    // reset tech portal mode when opening
     if (viewerRole === "tech") setMode("device");
 
     if (viewerRole === "user") {
@@ -319,14 +293,15 @@ export default function WaiverGate(props: {
       if (i.length < 2) throw new Error("Initials required");
       if (!signature) throw new Error("Signature required");
 
-      // ✅ USER RULE: must be submitted on service day
-      // (Tech can also be restricted; keeps policy consistent.)
-      if (!canSubmitToday) {
-        throw new Error(serviceDayInfo.reason || "Waiver can only be submitted on the service day.");
+      // ✅ FIX: Only enforce service-day restriction for portal/user signing.
+      if (viewerRole === "user" && !canSubmitToday) {
+        throw new Error(
+          serviceDayInfo.reason || "Waiver can only be submitted on the service day."
+        );
       }
 
       const token = await getAccessTokenBestEffort();
-      if (!token) throw new Error("Session expired. Please re-login.");
+      if (!token) throw new Error("Session missing on device. Please re-login.");
 
       const res = await fetch(`/api/appointments/${appointment.id}/waiver`, {
         method: "POST",
@@ -334,8 +309,10 @@ export default function WaiverGate(props: {
         headers: {
           "Content-Type": "application/json",
           authorization: `Bearer ${token}`,
+          "x-supabase-token": token,
         },
         body: JSON.stringify({
+          access_token: token,
           signer_name: n,
           initials: i,
           signer_email: appointment.customer_email ?? null,
@@ -345,7 +322,6 @@ export default function WaiverGate(props: {
           signature_type: "drawn",
           signer_role: "user",
           signature_name: n,
-          // ✅ OPTIONAL metadata (route can ignore if it doesn't use it)
           client_service_day: serviceDayInfo.serviceDay ?? null,
         }),
       });
@@ -359,7 +335,6 @@ export default function WaiverGate(props: {
       qc.invalidateQueries({ queryKey: ["appointment-waiver-exists", appointment.id] });
       qc.invalidateQueries({ queryKey: ["appointment", appointment.id] });
 
-      // clear local draft once it's officially signed
       clearDraft(String(appointment.id));
 
       onSatisfiedAction();
@@ -373,7 +348,6 @@ export default function WaiverGate(props: {
     const n = normalizeName(name);
     const i = normalizeInitials(initials);
 
-    // allow saving partial, but require at least something
     if (!n && !i && !signature) {
       setToast("Nothing to save yet");
       return;
@@ -390,9 +364,7 @@ export default function WaiverGate(props: {
   };
 
   const showPortalOption = viewerRole === "tech";
-
-  const submitLabel =
-    viewerRole === "user" ? "Submit Waiver (Service Day)" : "Sign Waiver";
+  const submitLabel = viewerRole === "user" ? "Submit Waiver (Service Day)" : "Sign Waiver";
 
   return (
     <Dialog
@@ -419,11 +391,11 @@ export default function WaiverGate(props: {
           </div>
         )}
 
-        {/* Service day rule notice (user-focused) */}
+        {/* Keep the info box for users; tech can still see it but it won't block submission */}
         {serviceDayInfo.serviceDay && (
           <div
             className={`rounded border p-3 text-xs ${
-              canSubmitToday
+              serviceDayInfo.isServiceDay
                 ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-100"
                 : "border-amber-400/35 bg-amber-500/10 text-amber-100"
             }`}
@@ -432,14 +404,21 @@ export default function WaiverGate(props: {
               <Clock className="w-4 h-4 mt-0.5 opacity-90" />
               <div className="space-y-1">
                 <p className="font-semibold">
-                  Waiver submission is required on the service day: {serviceDayInfo.label}
+                  Service day: {serviceDayInfo.label}
                 </p>
-                {!canSubmitToday ? (
-                  <p className="opacity-90">
-                    You can save your signature now, then submit it on {serviceDayInfo.label}.
-                  </p>
+
+                {viewerRole === "user" ? (
+                  !serviceDayInfo.isServiceDay ? (
+                    <p className="opacity-90">
+                      You can save your signature now, then submit it on {serviceDayInfo.label}.
+                    </p>
+                  ) : (
+                    <p className="opacity-90">You can submit the waiver today.</p>
+                  )
                 ) : (
-                  <p className="opacity-90">You can submit the waiver today.</p>
+                  <p className="opacity-90">
+                    Tech signing is allowed on-device even if the stored service day differs.
+                  </p>
                 )}
               </div>
             </div>
@@ -513,9 +492,7 @@ export default function WaiverGate(props: {
               </p>
             )}
 
-            {/* Actions */}
             <div className="flex gap-2">
-              {/* USER: Save draft (sign ahead of time) */}
               {viewerRole === "user" && (
                 <Button
                   variant="outline"
@@ -527,13 +504,8 @@ export default function WaiverGate(props: {
                 </Button>
               )}
 
-              {/* TECH: Portal option */}
               {showPortalOption && (
-                <Button
-                  variant="outline"
-                  onClick={() => setMode("portal")}
-                  className="flex-1"
-                >
+                <Button variant="outline" onClick={() => setMode("portal")} className="flex-1">
                   Portal Instead
                 </Button>
               )}
@@ -541,11 +513,12 @@ export default function WaiverGate(props: {
               <Button
                 onClick={() => signMutation.mutate()}
                 className="flex-1 bg-cyan-500 text-slate-950"
-                disabled={signMutation.isPending || !canSubmitToday}
+                // ✅ FIX: do not disable for tech because of service day
+                disabled={signMutation.isPending || (viewerRole === "user" && !canSubmitToday)}
                 title={
-                  canSubmitToday
-                    ? "Submit waiver"
-                    : serviceDayInfo.reason || "Waiver must be submitted on the service day."
+                  viewerRole === "user" && !canSubmitToday
+                    ? serviceDayInfo.reason || "Waiver must be submitted on the service day."
+                    : "Submit waiver"
                 }
               >
                 {signMutation.isPending ? (
@@ -561,11 +534,10 @@ export default function WaiverGate(props: {
               </Button>
             </div>
 
-            {/* Extra hint for user when disabled */}
             {viewerRole === "user" && !canSubmitToday && (
               <div className="mt-2 rounded border border-slate-800 bg-slate-900/60 p-3 text-xs text-slate-300">
-                Tip: save your signature now. On {serviceDayInfo.label}, come back here and
-                press <span className="text-slate-100 font-semibold">Submit Waiver</span>.
+                Tip: save your signature now. On {serviceDayInfo.label}, come back here and press{" "}
+                <span className="text-slate-100 font-semibold">Submit Waiver</span>.
               </div>
             )}
           </>

@@ -67,6 +67,21 @@ const CANCELLABLE_STATUSES = [
   "scheduled",
 ];
 
+function parseLocalDate(dateString?: string | null) {
+  if (!dateString) return null;
+
+  const [year, month, day] = dateString.split("T")[0].split("-").map(Number);
+  if (!year || !month || !day) return null;
+
+  return new Date(year, month - 1, day);
+}
+
+function formatAppointmentDate(dateString?: string | null) {
+  const date = parseLocalDate(dateString);
+  if (!date) return "";
+  return format(date, "EEEE, MMM d, yyyy");
+}
+
 function canCancelStatus(status?: string | null) {
   const normalized = (status ?? "").toLowerCase();
   return CANCELLABLE_STATUSES.includes(normalized);
@@ -351,7 +366,7 @@ export default function MyAppointmentsPage() {
       const { data, error } = await supabaseClient
         .from("appointments")
         .select("*")
-        .ilike("customer_email", email) // ✅ key fix (case-insensitive)
+        .eq("customer_email", email) // ✅ key fix (case-insensitive)
         .order("created_at", { ascending: false });
 
       if (error) throw error;
@@ -698,10 +713,7 @@ export default function MyAppointmentsPage() {
                                 <div className="flex items-center gap-2 text-slate-300">
                                   <Calendar className="w-4 h-4 text-sky-300 flex-shrink-0" />
                                   <span>
-                                    {format(
-                                      new Date(appointment.scheduled_date),
-                                      "EEEE, MMM d, yyyy"
-                                    )}
+                                    {formatAppointmentDate(appointment.scheduled_date)}
                                     {appointment.scheduled_time_start && (
                                       <span className="ml-2 text-sky-300 font-medium">
                                         {appointment.scheduled_time_start}

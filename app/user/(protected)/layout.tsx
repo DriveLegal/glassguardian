@@ -1,8 +1,4 @@
 // app/user/(protected)/layout.tsx
-// ✅ USE YOUR EXACT CODE (NO CHANGE NEEDED)
-// It stays server-only + nodejs runtime.
-// The badge is mounted in UserProtectedShell client-side.
-
 import "server-only";
 
 export const runtime = "nodejs";
@@ -15,11 +11,40 @@ import { headers } from "next/headers";
 import { createSupabaseServer } from "@/lib/supabase/server";
 import UserProtectedShell from "./UserProtectedShell";
 
-function buildLoginRedirect(pathname: string, search: string) {
+/**
+ * ✅ Key change:
+ * - Keep this layout STRICTLY auth-gated for most protected user routes.
+ * - BUT allow Stripe return / invoice-detail pages through without hard server auth,
+ *   because Stripe return can race with Supabase cookie/session availability.
+ *
+ * Those pages already do client-side auth recovery / redirect logic.
+ */
+
+function buildLoginRedirect(
+  pathname: string,
+  search: string,
+  extra?: Record<string, string>
+) {
   const full = `${pathname}${search || ""}`;
   const qp = new URLSearchParams();
   qp.set("redirect", full);
+  if (extra) {
+    for (const [k, v] of Object.entries(extra)) qp.set(k, v);
+  }
   return `/user/login?${qp.toString()}`;
+}
+
+function isSoftProtectedUserPayPath(pathname: string) {
+  if (pathname === "/user/dashboard/pay/success") return true;
+  if (pathname === "/user/dashboard/pay/cancel") return true;
+
+  // /user/dashboard/pay/[id]
+  if (/^\/user\/dashboard\/pay\/[^/]+$/.test(pathname)) return true;
+
+  // /user/dashboard/pay/[id]/receipt
+  if (/^\/user\/dashboard\/pay\/[^/]+\/receipt$/.test(pathname)) return true;
+
+  return false;
 }
 
 export default async function UserProtectedLayout({
@@ -27,46 +52,38 @@ export default async function UserProtectedLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const supabase = await createSupabaseServer();
-
-  // 1) Must have a session user
-  const { data: userData } = await supabase.auth.getUser();
-  const user = userData?.user ?? null;
-
   const h = await headers();
   const pathname = h.get("x-pathname") || "/user/dashboard";
   const search = h.get("x-search") || "";
 
+  // ✅ Let Stripe return / invoice-detail pages render without hard server auth.
+  // Their page-level logic will recover or redirect on the client side.
+  if (isSoftProtectedUserPayPath(pathname)) {
+    return <UserProtectedShell>{children}</UserProtectedShell>;
+  }
+
+  const supabase = await createSupabaseServer();
+
+  // 1) Must have a session user (this is the only hard gate here)
+  const { data: userData, error: userErr } = await supabase.auth.getUser();
+  const user = userData?.user ?? null;
+
   if (!user) {
-    redirect(buildLoginRedirect(pathname, search));
+    redirect(
+      buildLoginRedirect(pathname, search, {
+        err: userErr ? "auth_user_failed" : "no_session",
+      })
+    );
   }
 
-  // 2) Must have an app_users row (RLS-safe check)
-  // Use OR: auth_user_id = auth.uid OR email = auth.email (your policy supports this)
-  const authUid = user.id;
+  // 2) Optional soft-check: if email is missing, still fail closed (should never happen)
   const email = (user.email ?? "").trim().toLowerCase();
-
-  // If email missing somehow, fail closed
   if (!email) {
-    redirect(buildLoginRedirect(pathname, search));
-  }
-
-  const { data: appUser } = await supabase
-    .from("app_users")
-    .select("id")
-    .or(`auth_user_id.eq.${authUid},email.ilike.${email}`)
-    .maybeSingle();
-
-  // If app_users row is missing, bounce to login (bootstrap should fix on next sign-in)
-  if (!appUser?.id) {
-    const qp = new URLSearchParams();
-    qp.set("redirect", `${pathname}${search || ""}`);
-    qp.set("err", "profile_missing");
-    redirect(`/user/login?${qp.toString()}`);
+    redirect(buildLoginRedirect(pathname, search, { err: "email_missing" }));
   }
 
   // 3) Render the (client) shell
-  // NOTE: To make the security badge "truly bottom of each page" (not fixed),
-  // mount <SecurityRail /> inside UserProtectedShell *below* the page content.
+  // NOTE: app_users linking/creation is handled by /api/user/bootstrap (service role) after login.
+  // Keeping this layout free of app_users gating prevents redirect loops.
   return <UserProtectedShell>{children}</UserProtectedShell>;
 }

@@ -285,10 +285,8 @@ export default function IOSUserProtectedLayout({
       >
         {/* Cosmic background */}
         <CosmicScene
-          variant="prime"
-          enableParallax={enableAmbient}
-          enableMeteors={enableAmbient}
-          enableConstellation={enableAmbient}
+          intensity="rich"
+          animated={enableAmbient}
         />
 
         {/* Top chrome (iOS) */}

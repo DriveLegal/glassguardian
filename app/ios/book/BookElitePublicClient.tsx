@@ -381,10 +381,8 @@ export default function BookElitePublicClient() {
         `}</style>
 
         <CosmicScene
-          variant="prime"
-          enableParallax={enableAmbient}
-          enableMeteors={enableAmbient}
-          enableConstellation={enableAmbient}
+          animated={enableAmbient}
+          intensity={enableAmbient ? "rich" : "lite"}
         />
 
         <div className="relative z-10 mx-auto w-full max-w-[560px] px-4 pb-14 pt-8 sm:px-5 sm:pt-10">

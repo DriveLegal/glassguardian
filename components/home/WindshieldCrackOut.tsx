@@ -1,10 +1,11 @@
+// components/home/WindshieldCrackOut.tsx
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 
 /* -----------------------------------------------------------
    TS augmentation: optional createConicGradient on 2D context
-   ----------------------------------------------------------- */
+----------------------------------------------------------- */
 declare global {
   interface CanvasRenderingContext2D {
     createConicGradient?(
@@ -26,9 +27,41 @@ type CrackPath = {
 };
 type Ring = { cx: number; cy: number; r: number; alpha: number };
 
-/** How much of the original stress range we want:
- *  0–100% (UI) → 0–5% (old visual). */
-const STRESS_SCALE = 0.05;
+/**
+ * ✅ Make stress actually matter.
+ * Old: 0..1 mapped to 0..0.05 (too subtle)
+ * New: 0..1 mapped to 0..0.22 with a nonlinear curve
+ */
+const STRESS_SCALE = 0.22;
+
+const clamp01 = (n: number) => Math.max(0, Math.min(1, n));
+
+/**
+ * ✅ Nonlinear response curve:
+ * - gives more range in the middle/high end
+ * - still controllable at the low end
+ */
+const stressCurve = (u: number) => Math.pow(clamp01(u), 1.25);
+
+function usePrefersReducedMotion() {
+  const [reduced, setReduced] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function")
+      return;
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const apply = () => setReduced(!!mq.matches);
+    apply();
+    if (typeof mq.addEventListener === "function")
+      mq.addEventListener("change", apply);
+    else mq.addListener(apply);
+    return () => {
+      if (typeof mq.removeEventListener === "function")
+        mq.removeEventListener("change", apply);
+      else mq.removeListener(apply);
+    };
+  }, []);
+  return reduced;
+}
 
 export default function WindshieldCrackOut({
   height = 420,
@@ -39,12 +72,37 @@ export default function WindshieldCrackOut({
   stress?: number;
   autoStart?: boolean;
 }) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const glassContainerRef = useRef<HTMLDivElement | null>(null);
-  const [running, setRunning] = useState(autoStart);
-  const [uiStress, setUiStress] = useState(stress);
-  const [healing, setHealing] = useState(0);
+
+  const prefersReducedMotion = usePrefersReducedMotion();
+
+  const [running, setRunning] = useState<boolean>(
+    prefersReducedMotion ? false : !!autoStart
+  );
+  const [uiStress, setUiStress] = useState<number>(clamp01(stress));
+  const [healing, setHealing] = useState<number>(0);
   const raf = useRef<number | null>(null);
+
+  // Ref mirrors
+  const runningRef = useRef(running);
+  const uiStressRef = useRef(uiStress);
+  const healingRef = useRef(healing);
+
+  useEffect(() => {
+    runningRef.current = running;
+  }, [running]);
+  useEffect(() => {
+    uiStressRef.current = clamp01(uiStress);
+  }, [uiStress]);
+  useEffect(() => {
+    healingRef.current = clamp01(healing);
+  }, [healing]);
+
+  // Visibility / lifecycle guards
+  const visibleRef = useRef(true);
+  const inViewRef = useRef(true);
 
   const cracks = useRef<CrackPath[]>([]);
   const rings = useRef<Ring[]>([]);
@@ -76,6 +134,7 @@ export default function WindshieldCrackOut({
   // Rock sprite
   const spriteImg = useRef<HTMLImageElement | null>(null);
   const spriteLoaded = useRef(false);
+
   useEffect(() => {
     const img = new Image();
     const svgStr = `
@@ -114,16 +173,22 @@ export default function WindshieldCrackOut({
   const MAX_IMPACTS = 2;
 
   // DPR clamp
-  const dpr = () =>
-    typeof window !== "undefined"
-      ? Math.max(1, Math.min(2, window.devicePixelRatio || 1))
-      : 1;
+  const dpr = useCallback(() => {
+    if (typeof window === "undefined") return 1;
+    return Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  }, []);
 
   // Effects
   const roadShockRef = useRef({ active: false, start: 0 });
   const tempSwingRef = useRef({ active: false, start: 0 });
   const doorSlamRef = useRef({ active: false, start: 0, duration: 400 });
   const roadLastMicro = useRef(0);
+
+  // Canvas sizing cache
+  const sizeRef = useRef({ w: 0, h: 0, pr: 1 });
+
+  // ✅ Stress helper: “effective” stress used everywhere (0..~0.22)
+  const stressS = () => stressCurve(uiStressRef.current) * STRESS_SCALE;
 
   // ----- Windshield geometry -----
   const getGlassRect = (w: number, h: number) => {
@@ -148,16 +213,35 @@ export default function WindshieldCrackOut({
     const bez = (xx: number) => -((xx / (w / 2)) ** 2) * (h * bend);
     ctx.moveTo(x + r, y + bez(-w / 2));
     ctx.lineTo(x + w - r, y + bez(w / 2));
-    ctx.quadraticCurveTo(x + w, y + bez(w / 2), x + w, y + r + bez(w / 2));
+    ctx.quadraticCurveTo(
+      x + w,
+      y + bez(w / 2),
+      x + w,
+      y + r + bez(w / 2)
+    );
     ctx.lineTo(x + w, y + h - r + bez(w / 2));
-    ctx.quadraticCurveTo(x + w, y + h + bez(w / 2), x + w - r, y + h + bez(w / 2));
+    ctx.quadraticCurveTo(
+      x + w,
+      y + h + bez(w / 2),
+      x + w - r,
+      y + h + bez(w / 2)
+    );
     ctx.lineTo(x + r, y + h + bez(-w / 2));
-    ctx.quadraticCurveTo(x, y + h + bez(-w / 2), x, y + h - r + bez(-w / 2));
+    ctx.quadraticCurveTo(
+      x,
+      y + h + bez(-w / 2),
+      x,
+      y + h - r + bez(-w / 2)
+    );
     ctx.lineTo(x, y + r + bez(-w / 2));
     ctx.quadraticCurveTo(x, y + bez(-w / 2), x + r, y + bez(-w / 2));
   };
 
-  const beginGlassClip = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
+  const beginGlassClip = (
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number
+  ) => {
     const { cx, cy, W, H, r, bend } = getGlassRect(w, h);
     ctx.save();
     ctx.translate(cx, cy);
@@ -170,106 +254,116 @@ export default function WindshieldCrackOut({
 
   const insideGlass = (x: number, y: number, w: number, h: number) => {
     const { cx, cy, W, H } = getGlassRect(w, h);
-    return x >= cx - W / 2 && x <= cx + W / 2 && y >= cy - H / 2 && y <= cy + H / 2;
+    return (
+      x >= cx - W / 2 &&
+      x <= cx + W / 2 &&
+      y >= cy - H / 2 &&
+      y <= cy + H / 2
+    );
   };
 
   // ----- FRACTURE IGNITION -----
-  const igniteFracture = () => {
+  const igniteFracture = useCallback(() => {
     if (fullFractureRef.current) return;
     fullFractureRef.current = true;
 
-    const s = uiStress * STRESS_SCALE;
+    const s = stressS();
 
-    // Boost existing segments
     cracks.current = cracks.current.map((c) => ({
       ...c,
-      life: c.life + 80 + Math.floor(s * 120),
-      branchChance: Math.max(c.branchChance, 0.08 + s * 0.12),
-      speed: c.speed * (1.08 + s * 0.42),
-      width: Math.max(c.width, 0.9),
+      life: c.life + 110 + Math.floor(s * 420),
+      branchChance: Math.max(c.branchChance, 0.09 + s * 0.55),
+      speed: c.speed * (1.1 + s * 1.1),
+      width: Math.max(c.width, 1.0),
     }));
 
-    // Big burst from each impact point
     const addBurst = (x: number, y: number) => {
-      const power = 0.9 + s * 1.1;
-      const rays = 20 + Math.floor(s * 30);
-      const baseLen = 6 + Math.random() * 6;
+      const power = 1.0 + s * 3.0;
+      const rays = 22 + Math.floor(s * 90);
+      const baseLen = 7 + Math.random() * 8;
 
-      rings.current.push({ cx: x, cy: y, r: 10 + Math.random() * 6, alpha: 0.55 });
+      rings.current.push({
+        cx: x,
+        cy: y,
+        r: 10 + Math.random() * 6,
+        alpha: 0.6,
+      });
 
       for (let i = 0; i < rays; i++) {
-        const jitter = (Math.random() - 0.5) * 0.25;
+        const jitter = (Math.random() - 0.5) * 0.28;
         const angle = (i / rays) * Math.PI * 2 + jitter;
         cracks.current.push({
-          points: [{ x, y }, { x: x + Math.cos(angle) * baseLen, y: y + Math.sin(angle) * baseLen }],
+          points: [
+            { x, y },
+            { x: x + Math.cos(angle) * baseLen, y: y + Math.sin(angle) * baseLen },
+          ],
           dir: angle,
-          speed: 1.2 + power * 2.2,
-          life: 120 + Math.floor(power * 180),
-          width: 1.0 + Math.random() * 0.6,
-          branchChance: 0.1 + s * 0.2,
+          speed: 1.35 + power * 2.6,
+          life: 130 + Math.floor(power * 220),
+          width: 1.05 + Math.random() * 0.75,
+          branchChance: 0.01 + s * 0.55,
         });
       }
     };
 
     impactPoints.current.forEach((p) => addBurst(p.x, p.y));
-  };
+  }, []);
 
   // ----- Impacts -----
-  const impactAt = (x: number, y: number) => {
+  const impactAt = useCallback((x: number, y: number) => {
     if (impactsCount.current >= MAX_IMPACTS) return;
 
-    const s = uiStress * STRESS_SCALE;
+    const s = stressS();
 
     impactPoints.current.push({ x, y });
 
-    // Tiny chip before ignition
-    const power = 0.4 + s * 0.4;
-    const rays = 4 + Math.floor(s * 3);
-    const seedLen = 1.5 + Math.random() * 2.0;
+    const power = 0.45 + s * 1.2;
+    const rays = 2 + Math.floor(s * 2);
+    const seedLen = 1.8 + Math.random() * 2.4;
 
-    rings.current.push({ cx: x, cy: y, r: 5 + Math.random() * 3, alpha: 0.5 });
+    rings.current.push({ cx: x, cy: y, r: 5 + Math.random() * 3, alpha: 0.55 });
 
     for (let i = 0; i < rays; i++) {
-      const jitter = (Math.random() - 0.5) * 0.3;
+      const jitter = (Math.random() - 0.5) * 0.35;
       const angle = (i / rays) * Math.PI * 2 + jitter;
       cracks.current.push({
         points: [{ x, y }, { x: x + Math.cos(angle) * seedLen, y: y + Math.sin(angle) * seedLen }],
         dir: angle,
-        speed: 0.6 + power * 1.0,
-        life: 8 + Math.floor(power * 10),
-        width: 0.7 + Math.random() * 0.4,
-        branchChance: 0.005 + s * 0.01,
+        speed: 0.75 + power * 1.15,
+        life: 10 + Math.floor(power * 16),
+        width: 0.75 + Math.random() * 0.55,
+        branchChance: 0.01 + s * 0.12,
       });
     }
 
-    // a couple micro scratches
-    const micro = 2 + Math.floor(s * 3);
+    const micro = 0 + Math.floor(s * 8);
     for (let i = 0; i < micro; i++) {
       const a = Math.random() * Math.PI * 2;
       cracks.current.push({
         points: [{ x, y }],
         dir: a,
-        speed: 0.45 + Math.random() * 0.6,
-        life: 6 + Math.floor(Math.random() * 8),
-        width: 0.4,
-        branchChance: 0.005 + s * 0.01,
+        speed: 0.55 + Math.random() * 0.8,
+        life: 7 + Math.floor(Math.random() * 12),
+        width: 0.45,
+        branchChance: 0.01 + s * 0.12,
       });
     }
 
-    flash.current = { t: performance.now(), x, y, life: 130 };
+    flash.current = { t: performance.now(), x, y, life: 150 + Math.floor(s * 260) };
     impactsCount.current = Math.min(MAX_IMPACTS, impactsCount.current + 1);
-  };
+  }, []);
 
   const stepCracks = (w: number, h: number) => {
-    const s = uiStress * STRESS_SCALE;
+    const s = stressS();
 
     const next: CrackPath[] = [];
     const MAX = 3000;
     for (const c of cracks.current) {
       if (c.life > 0) {
-        const turn = (Math.random() - 0.5) * (0.10 + s * 0.14);
+        const turn = (Math.random() - 0.5) * (0.11 + s * 0.75);
         c.dir += turn;
-        const speed = c.speed * (0.92 + Math.random() * 0.14);
+
+        const speed = c.speed * (0.9 + Math.random() * 0.2) * (1 + s * 0.35);
         const last = c.points[c.points.length - 1];
         const nx = last.x + Math.cos(c.dir) * speed;
         const ny = last.y + Math.sin(c.dir) * speed;
@@ -284,14 +378,14 @@ export default function WindshieldCrackOut({
         c.life -= 1;
 
         if (Math.random() < c.branchChance && cracks.current.length + next.length < MAX) {
-          const bDir = c.dir + (Math.random() < 0.5 ? -1 : 1) * (0.25 + Math.random() * 0.36);
+          const bDir = c.dir + (Math.random() < 0.5 ? -1 : 1) * (0.28 + Math.random() * 0.55 + s * 0.6);
           next.push({
             points: [{ ...(c.points[c.points.length - 2] || c.points[c.points.length - 1]) }],
             dir: bDir,
-            speed: Math.max(0.6, c.speed * (0.7 + Math.random() * 0.4)),
-            life: Math.max(8, Math.floor(c.life * (0.25 + Math.random() * 0.45))),
-            width: Math.max(0.5, c.width * 0.6),
-            branchChance: c.branchChance * (0.6 + Math.random() * 0.4),
+            speed: Math.max(0.6, c.speed * (0.7 + Math.random() * 0.55)),
+            life: Math.max(8, Math.floor(c.life * (0.25 + Math.random() * 0.55))),
+            width: Math.max(0.5, c.width * 0.65),
+            branchChance: c.branchChance * (0.7 + Math.random() * 0.55),
           });
         }
 
@@ -304,8 +398,8 @@ export default function WindshieldCrackOut({
 
     for (let i = rings.current.length - 1; i >= 0; i--) {
       const r = rings.current[i];
-      r.r += 0.28 + Math.random() * 0.28;
-      r.alpha -= 0.006 + Math.random() * 0.006;
+      r.r += 0.28 + Math.random() * (0.3 + s * 0.6);
+      r.alpha -= 0.006 + Math.random() * (0.008 + s * 0.02);
       if (r.alpha <= 0.01) rings.current.splice(i, 1);
     }
   };
@@ -328,7 +422,7 @@ export default function WindshieldCrackOut({
       const t = i / dots;
       const angle = t * Math.PI * 2;
       const ex = (W / 2 - 6) * Math.cos(angle);
-      const ey = (H / 2 - 6) * Math.sin(angle) - (Math.cos(angle) ** 2) * (H * bend);
+      const ey = (H / 2 - 6) * Math.sin(angle) - Math.cos(angle) ** 2 * (H * bend);
       const size = 1 + (i % 4 === 0 ? 0.6 : 0);
       ctx.beginPath();
       ctx.arc(ex, ey, size, 0, Math.PI * 2);
@@ -339,11 +433,12 @@ export default function WindshieldCrackOut({
 
   const drawRings = (ctx: CanvasRenderingContext2D) => {
     if (!rings.current.length) return;
+    const heal = healingRef.current;
     ctx.save();
     ctx.setLineDash([8, 8]);
     ctx.lineCap = "round";
     for (const r of rings.current) {
-      const a = r.alpha * (1 - healing);
+      const a = r.alpha * (1 - heal);
       if (a <= 0.01) continue;
       ctx.lineWidth = 1.0;
       ctx.strokeStyle = `rgba(40,40,40,${a})`;
@@ -362,29 +457,30 @@ export default function WindshieldCrackOut({
 
   const drawCracks = (ctx: CanvasRenderingContext2D) => {
     if (!cracks.current.length) return;
+    const heal = healingRef.current;
     ctx.save();
     ctx.lineCap = "round";
 
-    ctx.strokeStyle = `rgba(36,36,36,${0.95 * (1 - healing)})`;
+    ctx.strokeStyle = `rgba(36,36,36,${0.95 * (1 - heal)})`;
     for (const c of cracks.current) {
       if (c.points.length < 2) continue;
       ctx.beginPath();
       ctx.moveTo(c.points[0].x, c.points[0].y);
       for (let i = 1; i < c.points.length; i++) ctx.lineTo(c.points[i].x, c.points[i].y);
-      const k = Math.max(0.18, Math.min(1, c.life > 0 ? c.life / 100 : 0));
-      ctx.lineWidth = c.life > 0 ? Math.max(0.35, c.width * (0.55 + 0.45 * k)) : Math.max(0.33, c.width * 0.4);
+      const k = Math.max(0.18, Math.min(1, c.life > 0 ? c.life / 120 : 0));
+      ctx.lineWidth = c.life > 0 ? Math.max(0.4, c.width * (0.6 + 0.55 * k)) : Math.max(0.35, c.width * 0.45);
       ctx.stroke();
     }
 
-    ctx.strokeStyle = `rgba(255,255,255,${0.26 * (1 - healing)})`;
+    ctx.strokeStyle = `rgba(255,255,255,${0.28 * (1 - heal)})`;
     for (const c of cracks.current) {
       if (c.points.length < 2) continue;
       ctx.beginPath();
-      const off = 0.5;
+      const off = 0.6;
       ctx.moveTo(c.points[0].x + off, c.points[0].y + off);
       for (let i = 1; i < c.points.length; i++) ctx.lineTo(c.points[i].x + off, c.points[i].y + off);
-      const k = Math.max(0.18, Math.min(1, c.life > 0 ? c.life / 100 : 0));
-      ctx.lineWidth = c.life > 0 ? Math.max(0.25, c.width * 0.45 * k) : Math.max(0.22, c.width * 0.22);
+      const k = Math.max(0.18, Math.min(1, c.life > 0 ? c.life / 120 : 0));
+      ctx.lineWidth = c.life > 0 ? Math.max(0.28, c.width * 0.5 * k) : Math.max(0.24, c.width * 0.25);
       ctx.stroke();
     }
 
@@ -403,10 +499,17 @@ export default function WindshieldCrackOut({
 
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
-    const r1 = 44 + k * 24;
-    const grad = ctx.createRadialGradient(flash.current.x, flash.current.y, 0, flash.current.x, flash.current.y, r1);
-    grad.addColorStop(0, `rgba(255,245,210,${0.18 * k})`);
-    grad.addColorStop(0.6, `rgba(255,220,150,${0.08 * k})`);
+    const r1 = 44 + k * 30;
+    const grad = ctx.createRadialGradient(
+      flash.current.x,
+      flash.current.y,
+      0,
+      flash.current.x,
+      flash.current.y,
+      r1
+    );
+    grad.addColorStop(0, `rgba(255,245,210,${0.22 * k})`);
+    grad.addColorStop(0.6, `rgba(255,220,150,${0.11 * k})`);
     grad.addColorStop(1, "rgba(255,220,150,0)");
     ctx.fillStyle = grad;
     ctx.beginPath();
@@ -442,7 +545,6 @@ export default function WindshieldCrackOut({
     ctx.restore();
   };
 
-  // ----- Temp Swing aura ONLY around windshield rim (slow + soft) -----
   function drawTempAura(
     ctx: CanvasRenderingContext2D,
     cx: number,
@@ -455,11 +557,9 @@ export default function WindshieldCrackOut({
   ) {
     if (!tempSwingRef.current.active) return;
 
-    const s = uiStress * STRESS_SCALE;
-
-    // Slow angular travel (constant) + gentle wobble (scaled)
+    const s = stressS();
     const elapsed = (now - tempSwingRef.current.start) / 1000;
-    const angularSpeed = 0.35; // radians/sec (keep slow)
+    const angularSpeed = 0.35;
     const theta = elapsed * angularSpeed;
 
     const grad = ctx.createConicGradient?.(theta, cx, cy);
@@ -469,9 +569,10 @@ export default function WindshieldCrackOut({
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
 
-    const auraWidth = Math.max(8, Math.min(14, Math.floor(H * 0.06)));
+    const auraWidth = Math.max(8, Math.min(16, Math.floor(H * 0.06 + s * 18)));
 
-    const wobble = Math.sin(elapsed * (0.35 + s * 0.35) * Math.PI * 2) * (1 + s * 2);
+    const wobble =
+      Math.sin(elapsed * (0.35 + s * 1.2) * Math.PI * 2) * (1.5 + s * 10);
     ctx.translate(wobble, wobble * 0.6);
 
     ctx.beginPath();
@@ -481,30 +582,28 @@ export default function WindshieldCrackOut({
 
     if (grad) {
       grad.addColorStop(0.0, "rgba(80,140,255,0.22)");
-      grad.addColorStop(0.2, "rgba(120,110,255,0.24)");
-      grad.addColorStop(0.5, "rgba(255,120,120,0.26)");
-      grad.addColorStop(0.8, "rgba(120,110,255,0.24)");
+      grad.addColorStop(0.2, "rgba(120,110,255,0.26)");
+      grad.addColorStop(0.5, "rgba(255,120,120,0.28)");
+      grad.addColorStop(0.8, "rgba(120,110,255,0.26)");
       grad.addColorStop(1.0, "rgba(80,140,255,0.22)");
       ctx.strokeStyle = grad;
     } else {
       const lg = ctx.createLinearGradient(-W / 2, 0, W / 2, 0);
       lg.addColorStop(0, "rgba(80,140,255,0.22)");
-      lg.addColorStop(0.5, "rgba(255,120,120,0.26)");
+      lg.addColorStop(0.5, "rgba(255,120,120,0.28)");
       lg.addColorStop(1, "rgba(80,140,255,0.22)");
       ctx.strokeStyle = lg;
     }
 
     ctx.shadowBlur = Math.max(6, auraWidth);
-    ctx.shadowColor = "rgba(120,140,255,0.25)";
-    ctx.globalAlpha = 0.9;
+    ctx.shadowColor = "rgba(120,140,255,0.28)";
+    ctx.globalAlpha = 0.95;
 
     ctx.stroke();
     ctx.restore();
   }
 
-  // ----- Scene drawing (windshield-local transforms) -----
   const drawScene = (ctx: CanvasRenderingContext2D, w: number, h: number, now: number) => {
-    // Background
     const sky = ctx.createLinearGradient(0, 0, 0, h);
     sky.addColorStop(0.0, "#071028");
     sky.addColorStop(0.35, "#0f1e46");
@@ -513,24 +612,21 @@ export default function WindshieldCrackOut({
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, w, h);
 
-    // Horizon glow
     const hg = ctx.createLinearGradient(0, h * 0.42, 0, h * 0.58);
     hg.addColorStop(0, "rgba(160,190,255,0.12)");
     hg.addColorStop(1, "rgba(160,190,255,0.00)");
     ctx.fillStyle = hg;
     ctx.fillRect(0, h * 0.38, w, h * 0.24);
 
-    // Windshield-local offsets
     let offsetX = 0;
     let offsetY = 0;
 
-    // Door slam
     if (doorSlamRef.current.active) {
       const elapsed = now - doorSlamRef.current.start;
       const dur = doorSlamRef.current.duration;
       if (elapsed < dur) {
         const progress = elapsed / dur;
-        const amp = (1 - progress) * 10;
+        const amp = (1 - progress) * 12;
         offsetX += (Math.random() - 0.5) * amp;
         offsetY += (Math.random() - 0.5) * amp;
       } else {
@@ -538,15 +634,14 @@ export default function WindshieldCrackOut({
       }
     }
 
-    // Road shock (scaled)
     if (roadShockRef.current.active) {
-      const s = uiStress * STRESS_SCALE;
+      const s = stressS();
       const elapsed = (now - roadShockRef.current.start) / 1000;
-      const freq = 2.2 + s * 2.0;
-      const amp = 4 + s * 8;
+      const freq = 2.2 + s * 5.0;
+      const amp = 4 + s * 34;
       offsetY += Math.sin(elapsed * freq * Math.PI * 2) * amp;
 
-      if (fullFractureRef.current && now - roadLastMicro.current > 300 + (1 - s) * 800) {
+      if (fullFractureRef.current && now - roadLastMicro.current > 260 + (1 - s) * 650) {
         const { cx, cy, W, H } = getGlassRect(w, h);
         const mx = cx - W / 2 + Math.random() * W;
         const my = cy - H / 2 + Math.random() * H;
@@ -555,30 +650,27 @@ export default function WindshieldCrackOut({
           points: [{ x: mx, y: my }],
           dir: a,
           speed: 0.4 + Math.random() * 0.6,
-          life: 6 + Math.floor(Math.random() * 8),
-          width: 0.4,
-          branchChance: 0.01 + s * 0.02,
+          life: 6 + Math.floor(Math.random() * 10),
+          width: 0.45,
+          branchChance: 0.02 + stressS() * 0.22,
         });
         roadLastMicro.current = now;
       }
     }
 
-    // Temp Swing wobble (scaled)
     if (tempSwingRef.current.active) {
-      const s = uiStress * STRESS_SCALE;
+      const s = stressS();
       const elapsed = (now - tempSwingRef.current.start) / 1000;
-      const tfreq = 0.35 + s * 0.35;
-      const twobble = Math.sin(elapsed * tfreq * Math.PI * 2) * (1.5 + s * 2.5);
+      const tfreq = 0.35 + s * 1.2;
+      const twobble = Math.sin(elapsed * tfreq * Math.PI * 2) * (1.5 + s * 10);
       offsetX += twobble;
     }
 
-    // Draw windshield with offsets
     ctx.save();
     ctx.translate(offsetX, offsetY);
 
     const { cx, cy, W, H, r, bend } = getGlassRect(w, h);
 
-    // Vignette outside glass with cutout
     ctx.save();
     ctx.fillStyle = "rgba(0,0,0,0.38)";
     ctx.fillRect(0, 0, w, h);
@@ -590,7 +682,6 @@ export default function WindshieldCrackOut({
     ctx.globalCompositeOperation = "source-over";
     ctx.restore();
 
-    // Inside glass
     beginGlassClip(ctx, w, h);
 
     const tint = ctx.createLinearGradient(0, cy - H / 2, 0, cy + H / 2);
@@ -599,7 +690,6 @@ export default function WindshieldCrackOut({
     ctx.fillStyle = tint;
     ctx.fillRect(cx - W / 2, cy - H / 2, W, H);
 
-    // Subtle bands
     for (let i = 0; i < 5; i++) {
       const bandX = cx - W / 2 + (W * (i + 0.5)) / 5;
       const grd = ctx.createLinearGradient(bandX - 20, cy - H / 2, bandX + 20, cy + H / 2);
@@ -610,7 +700,6 @@ export default function WindshieldCrackOut({
       ctx.fillRect(bandX - 20, cy - H / 2, 40, H);
     }
 
-    // Curved highlight
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
     ctx.beginPath();
@@ -621,7 +710,6 @@ export default function WindshieldCrackOut({
     ctx.stroke();
     ctx.restore();
 
-    // Defroster lines
     ctx.save();
     ctx.globalAlpha = 0.06;
     ctx.strokeStyle = "#ffffff";
@@ -634,13 +722,11 @@ export default function WindshieldCrackOut({
     }
     ctx.restore();
 
-    // Cracks & rings
     drawRings(ctx);
     drawCracks(ctx);
 
     endClip(ctx);
 
-    // Frit / rim
     drawFrit(ctx, cx, cy, W, H, r, bend);
     ctx.save();
     ctx.translate(cx, cy);
@@ -651,19 +737,14 @@ export default function WindshieldCrackOut({
     ctx.stroke();
     ctx.restore();
 
-    // Temp aura around the rim ONLY (after rim so it sits on top)
     drawTempAura(ctx, cx, cy, W, H, r, bend, now);
-
-    // Impact flash
     drawFlash(ctx, now);
 
-    ctx.restore(); // undo windshield translation
+    ctx.restore();
 
-    // Rock in front
     drawRock(ctx);
   };
 
-  // ----- Rock spawn/step -----
   const spawnRock = (w: number, h: number, tx: number, ty: number) => {
     if (impactsCount.current >= MAX_IMPACTS) return;
 
@@ -672,18 +753,22 @@ export default function WindshieldCrackOut({
     const dx = tx - startX;
     const dy = ty - startY;
     const dist = Math.hypot(dx, dy) || 1;
-    const travelSpeed = 5 + Math.random() * 3.5;
-    const vx = (dx / dist) * travelSpeed + (Math.random() - 0.5) * 0.4;
-    const vy = (dy / dist) * travelSpeed + (Math.random() - 0.5) * 0.25;
+
+    // ✅ Faster travel at higher stress (more dramatic)
+    const s = stressS();
+    const travelSpeed = 5 + Math.random() * 3.5 + s * 16;
+
+    const vx = (dx / dist) * travelSpeed + (Math.random() - 0.5) * (0.4 + s * 1.2);
+    const vy = (dy / dist) * travelSpeed + (Math.random() - 0.5) * (0.25 + s * 0.8);
 
     rock.current.alive = true;
     rock.current.x = startX;
     rock.current.y = startY;
     rock.current.vx = vx;
     rock.current.vy = vy;
-    rock.current.r = 5 + Math.random() * 7;
+    rock.current.r = 5 + Math.random() * 7 + s * 7;
     rock.current.rot = Math.random() * Math.PI * 2;
-    rock.current.rotVel = 0.06 + Math.random() * 0.18;
+    rock.current.rotVel = 0.06 + Math.random() * 0.18 + s * 0.25;
     rock.current.tx = tx;
     rock.current.ty = ty;
   };
@@ -726,34 +811,59 @@ export default function WindshieldCrackOut({
     }
   };
 
-  // ----- Frame loop -----
-  const draw = () => {
-    const canvas = canvasRef.current!;
-    const ctx = canvas.getContext("2d")!;
+  const syncCanvasSize = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
     const pr = dpr();
-    const w = Math.max(2, Math.floor(canvas.clientWidth * pr));
-    const h = Math.max(2, Math.floor(canvas.clientHeight * pr));
-    if (canvas.width !== w || canvas.height !== h) {
+    const rect = canvas.getBoundingClientRect();
+    const w = Math.max(2, Math.floor(rect.width * pr));
+    const h = Math.max(2, Math.floor(rect.height * pr));
+
+    if (sizeRef.current.w !== w || sizeRef.current.h !== h || sizeRef.current.pr !== pr) {
+      sizeRef.current = { w, h, pr };
       canvas.width = w;
       canvas.height = h;
     }
+  }, [dpr]);
+
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    syncCanvasSize();
+
+    const w = canvas.width;
+    const h = canvas.height;
+
     ctx.clearRect(0, 0, w, h);
     drawScene(ctx, w, h, performance.now());
-  };
+  }, [syncCanvasSize]);
 
-  const loop = () => {
+  const loop = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const pr = dpr();
-    const w = canvas.width || Math.floor(canvas.clientWidth * pr);
-    const h = canvas.height || Math.floor(canvas.clientHeight * pr);
+    if (!visibleRef.current || !inViewRef.current || !runningRef.current) {
+      raf.current = null;
+      return;
+    }
 
-    // Auto impacts (still tiny until ignition)
+    const w = canvas.width || 2;
+    const h = canvas.height || 2;
+
+    const s = stressS();
+
+    // ✅ Higher stress = more frequent auto rocks (very noticeable)
+    const autoChance = 0.001 + s * 0.02;
+
     if (
-      running &&
       impactsCount.current < MAX_IMPACTS &&
-      Math.random() < (0.001 + (uiStress * STRESS_SCALE) * 0.002) &&
+      Math.random() < autoChance &&
       cracks.current.length < 2500 &&
       !rock.current.alive
     ) {
@@ -768,33 +878,94 @@ export default function WindshieldCrackOut({
       spawnRock(w, h, t.x, t.y);
     }
 
-    stepRock(canvas.width || w, canvas.height || h);
-    stepCracks(canvas.width || w, canvas.height || h);
-
+    stepRock(w, h);
+    stepCracks(w, h);
     draw();
 
     raf.current = requestAnimationFrame(loop);
-  };
+  }, [draw]);
+
+  const startLoop = useCallback(() => {
+    if (raf.current != null) return;
+    if (!runningRef.current) return;
+    if (!visibleRef.current || !inViewRef.current) return;
+    raf.current = requestAnimationFrame(loop);
+  }, [loop]);
+
+  const stopLoop = useCallback(() => {
+    if (raf.current != null) cancelAnimationFrame(raf.current);
+    raf.current = null;
+  }, []);
 
   useEffect(() => {
-    if (raf.current != null) cancelAnimationFrame(raf.current);
-    if (running) raf.current = requestAnimationFrame(loop);
-    return () => {
-      if (raf.current != null) cancelAnimationFrame(raf.current);
-      raf.current = null;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, uiStress]);
+    if (prefersReducedMotion) {
+      setRunning(false);
+      runningRef.current = false;
+      stopLoop();
+    }
+  }, [prefersReducedMotion, stopLoop]);
 
-  // ----- Interactions & UI -----
-  const onRepair = () => {
+  useEffect(() => {
+    const onVis = () => {
+      const vis = typeof document !== "undefined" ? !document.hidden : true;
+      visibleRef.current = vis;
+      if (!vis) stopLoop();
+      else startLoop();
+    };
+    if (typeof document !== "undefined") {
+      onVis();
+      document.addEventListener("visibilitychange", onVis);
+      return () => document.removeEventListener("visibilitychange", onVis);
+    }
+  }, [startLoop, stopLoop]);
+
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        const any = entries.some((e) => e.isIntersecting);
+        inViewRef.current = any;
+        if (!any) stopLoop();
+        else startLoop();
+      },
+      { threshold: [0, 0.1], rootMargin: "200px 0px" }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [startLoop, stopLoop]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === "undefined") {
+      syncCanvasSize();
+      return;
+    }
+    const ro = new ResizeObserver(() => {
+      syncCanvasSize();
+      draw();
+    });
+    ro.observe(canvas);
+    return () => ro.disconnect();
+  }, [draw, syncCanvasSize]);
+
+  useEffect(() => {
+    runningRef.current = running;
+    if (running) startLoop();
+    else stopLoop();
+  }, [running, startLoop, stopLoop]);
+
+  const onRepair = useCallback(() => {
     setHealing(0);
     const start = performance.now();
     const dur = 900;
     let handle: number | null = null;
+
     const fade = (t: number) => {
       const k = Math.min(1, (t - start) / dur);
       setHealing(k);
+      healingRef.current = k;
+
       if (k < 1) {
         handle = requestAnimationFrame(fade);
       } else {
@@ -807,51 +978,66 @@ export default function WindshieldCrackOut({
         roadShockRef.current.active = false;
         tempSwingRef.current.active = false;
         doorSlamRef.current.active = false;
+        rock.current.alive = false;
+
         if (glassContainerRef.current) {
           glassContainerRef.current.style.boxShadow = "";
           glassContainerRef.current.style.border = "";
         }
-        setTimeout(() => setHealing(0), 120);
+
+        setTimeout(() => {
+          setHealing(0);
+          healingRef.current = 0;
+          draw();
+        }, 120);
       }
     };
+
     handle = requestAnimationFrame(fade);
-  };
+    return () => {
+      if (handle != null) cancelAnimationFrame(handle);
+    };
+  }, [draw]);
 
-  const handlePointer = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const pr = dpr();
-    const cw = canvas.width || Math.floor(canvas.clientWidth * pr);
-    const ch = canvas.height || Math.floor(canvas.clientHeight * pr);
-    const scaleX = cw / rect.width;
-    const scaleY = ch / rect.height;
-    const x = (e.clientX - rect.left) * scaleX;
-    const y = (e.clientY - rect.top) * scaleY;
+  const handlePointer = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      if (impactsCount.current >= MAX_IMPACTS) return;
 
-    if (impactsCount.current >= MAX_IMPACTS) return;
+      const rect = canvas.getBoundingClientRect();
+      const pr = dpr();
+      const cw = canvas.width || Math.floor(rect.width * pr);
+      const ch = canvas.height || Math.floor(rect.height * pr);
 
-    if (insideGlass(x, y, cw, ch)) {
-      if (!rock.current.alive) {
-        spawnRock(cw, ch, x, y);
+      const scaleX = cw / rect.width;
+      const scaleY = ch / rect.height;
+
+      const x = (e.clientX - rect.left) * scaleX;
+      const y = (e.clientY - rect.top) * scaleY;
+
+      if (insideGlass(x, y, cw, ch)) {
+        if (!rock.current.alive) spawnRock(cw, ch, x, y);
       }
-    }
-  };
+    },
+    [dpr]
+  );
 
-  const ensureIgnited = () => {
+  const ensureIgnited = useCallback(() => {
     if (!fullFractureRef.current) igniteFracture();
-  };
+  }, [igniteFracture]);
 
-  const toggleRoadShock = () => {
+  const toggleRoadShock = useCallback(() => {
     const next = !roadShockRef.current.active;
     roadShockRef.current.active = next;
     if (next) {
       roadShockRef.current.start = performance.now();
       ensureIgnited();
     }
-  };
+    draw();
+  }, [ensureIgnited, draw]);
 
-  const toggleTempSwing = () => {
+  const toggleTempSwing = useCallback(() => {
     const next = !tempSwingRef.current.active;
     tempSwingRef.current.active = next;
     if (next) {
@@ -861,16 +1047,21 @@ export default function WindshieldCrackOut({
       glassContainerRef.current.style.boxShadow = "";
       glassContainerRef.current.style.border = "";
     }
-  };
+    draw();
+  }, [ensureIgnited, draw]);
 
-  const triggerDoorSlam = () => {
+  const triggerDoorSlam = useCallback(() => {
     doorSlamRef.current.active = true;
     doorSlamRef.current.start = performance.now();
     ensureIgnited();
-  };
+    draw();
+  }, [ensureIgnited, draw]);
+
+  const stressLabel = useMemo(() => `${Math.round(clamp01(uiStress) * 100)}%`, [uiStress]);
 
   return (
     <div
+      ref={hostRef}
       style={{
         borderRadius: 16,
         overflow: "hidden",
@@ -880,7 +1071,6 @@ export default function WindshieldCrackOut({
       }}
     >
       <div style={{ borderRadius: 12, padding: 0, background: "transparent", width: "100%", maxWidth: 960 }}>
-        {/* ======== Responsive toolbar ======== */}
         <div className="ws-toolbar">
           <div className="ws-stress">
             <strong className="ws-stress-label">Stress</strong>
@@ -891,15 +1081,14 @@ export default function WindshieldCrackOut({
               max={1}
               step={0.01}
               value={uiStress}
-              onChange={(e) => setUiStress(parseFloat(e.target.value))}
+              onChange={(e) => setUiStress(clamp01(parseFloat(e.target.value)))}
               aria-label="Stress"
-              title="0–100% slider maps to old 0–5% visual intensity"
             />
-            <div className="ws-stress-val">{(uiStress * 100).toFixed(0)}%</div>
+            <div className="ws-stress-val">{stressLabel}</div>
           </div>
 
           <div className="ws-actions">
-            <button className="gg-btn ws-btn" onClick={() => setRunning((r) => !r)}>
+            <button className="gg-btn ws-btn" onClick={() => setRunning((r) => !r)} aria-pressed={running}>
               {running ? "Pause" : "Play"}
             </button>
             <button className="gg-btn ws-btn" onClick={onRepair}>
@@ -909,6 +1098,7 @@ export default function WindshieldCrackOut({
               className="gg-btn ws-btn"
               onClick={toggleRoadShock}
               title="Toggle road shock (bumpy road simulation)"
+              aria-pressed={roadShockRef.current.active}
               style={{ background: roadShockRef.current.active ? "rgba(255,200,80,0.12)" : undefined }}
             >
               Road Shock
@@ -917,6 +1107,7 @@ export default function WindshieldCrackOut({
               className="gg-btn ws-btn"
               onClick={toggleTempSwing}
               title="Toggle temperature swings (rim aura only)"
+              aria-pressed={tempSwingRef.current.active}
               style={{ background: tempSwingRef.current.active ? "rgba(200,120,255,0.12)" : undefined }}
             >
               Temp Swing
@@ -927,7 +1118,6 @@ export default function WindshieldCrackOut({
           </div>
         </div>
 
-        {/* Windshield-only wrapper (kept for layout; no temp glow applied here) */}
         <div
           ref={glassContainerRef}
           style={{
@@ -951,6 +1141,9 @@ export default function WindshieldCrackOut({
               background: "transparent",
               cursor: "crosshair",
               borderRadius: 12,
+              touchAction: "manipulation",
+              userSelect: "none",
+              WebkitUserSelect: "none",
             }}
           />
           <div
@@ -972,7 +1165,6 @@ export default function WindshieldCrackOut({
         </div>
       </div>
 
-      {/* ======== toolbar layout CSS (scoped) ======== */}
       <style jsx>{`
         .ws-toolbar {
           padding: 12px;
@@ -1014,7 +1206,6 @@ export default function WindshieldCrackOut({
           white-space: nowrap;
         }
 
-        /* ===== Mobile (vertical) — stack actions BELOW stress row ==== */
         @media (max-width: 640px) {
           .ws-toolbar {
             flex-direction: column;
@@ -1041,9 +1232,15 @@ export default function WindshieldCrackOut({
             padding: 12px 10px;
             border-radius: 12px;
           }
-          .ws-actions .ws-btn:nth-child(1) { grid-column: span 1; }
-          .ws-actions .ws-btn:nth-child(2) { grid-column: span 1; }
-          .ws-actions .ws-btn:nth-child(3) { grid-column: span 2; }
+          .ws-actions .ws-btn:nth-child(1) {
+            grid-column: span 1;
+          }
+          .ws-actions .ws-btn:nth-child(2) {
+            grid-column: span 1;
+          }
+          .ws-actions .ws-btn:nth-child(3) {
+            grid-column: span 2;
+          }
         }
 
         @media (max-width: 360px) {

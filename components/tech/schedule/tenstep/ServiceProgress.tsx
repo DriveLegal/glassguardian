@@ -1,4 +1,3 @@
-// components/tech/schedule/tenstep/ServiceProgress.tsx
 "use client";
 
 import * as React from "react";
@@ -43,6 +42,7 @@ function getStatusIndex(current?: string | null) {
 
 function getStatusTimeline(current?: string | null) {
   const currentIndex = getStatusIndex(current);
+
   return SERVICE_STATUS_STEPS.map((s, idx) => ({
     ...s,
     completed: currentIndex >= 0 ? idx <= currentIndex : false,
@@ -59,38 +59,18 @@ export default function ServiceProgress(props: {
   status: string | null | undefined;
   onStatusClickAction: (next: ServiceStatusKey) => void;
   className?: string;
-
-  // optional: disable interactions while mutation pending
   busy?: boolean;
-
-  // optional lock per-step
   isStatusLockedAction?: (next: ServiceStatusKey) => boolean;
-
-  // explicit read-only mode (use this for user portal)
   readOnly?: boolean;
 }) {
   const busy = props.busy ?? false;
   const readOnly = props.readOnly ?? false;
 
   /**
-   * ✅ Sticky local status (TECH side only)
-   * - For interactive tech UI: instant + sticky feedback while server status catches up.
-   * - For read-only UI: DO NOT keep local sticky state (prevents stale UI).
+   * Controlled by parent only.
+   * This keeps Service Progress and Tech Workflow fully in sync.
    */
-  const [localStatus, setLocalStatus] = React.useState<string | null>(
-    readOnly ? null : props.status ?? null
-  );
-
-  React.useEffect(() => {
-    if (readOnly) return;
-    if (typeof props.status === "string" && props.status.length > 0) {
-      setLocalStatus(props.status);
-    }
-  }, [props.status, readOnly]);
-
-  const effectiveStatus = readOnly
-    ? props.status ?? null
-    : localStatus ?? props.status ?? null;
+  const effectiveStatus = props.status ?? null;
 
   const statusTimeline = React.useMemo(
     () => getStatusTimeline(effectiveStatus),
@@ -118,17 +98,17 @@ export default function ServiceProgress(props: {
           <p className="text-sm font-semibold text-slate-100">Service Progress</p>
 
           {!readOnly && (
-  <Badge className="bg-slate-800 text-slate-200 border border-slate-600">
-    {busy ? (
-      <span className="inline-flex items-center gap-2">
-        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-        Updating…
-      </span>
-    ) : (
-      "Tap a step to update"
-    )}
-  </Badge>
-)}
+            <Badge className="bg-slate-800 text-slate-200 border border-slate-600">
+              {busy ? (
+                <span className="inline-flex items-center gap-2">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Updating…
+                </span>
+              ) : (
+                "Tap a step to update"
+              )}
+            </Badge>
+          )}
         </div>
       </CardHeader>
 
@@ -157,11 +137,6 @@ export default function ServiceProgress(props: {
                   disabled={disabled}
                   onClick={() => {
                     if (disabled) return;
-
-                    // ✅ Instant + STICKY UI update (tech side)
-                    setLocalStatus(status.key);
-
-                    // ✅ Parent mutation
                     props.onStatusClickAction(status.key as ServiceStatusKey);
                   }}
                   className={cx(
@@ -175,14 +150,14 @@ export default function ServiceProgress(props: {
                     )}
 
                     <div
-                      className={[
+                      className={cx(
                         "relative flex items-center justify-center w-12 h-12 rounded-full border-[3px] text-xs transition-all duration-300",
                         status.current
                           ? "bg-sky-500 border-sky-300 shadow-[0_0_18px_rgba(56,189,248,0.9)]"
                           : status.completed
-                          ? "bg-emerald-500 border-emerald-300 shadow-[0_0_14px_rgba(16,185,129,0.8)]"
-                          : "bg-slate-950 border-slate-600 group-hover:border-slate-300",
-                      ].join(" ")}
+                            ? "bg-emerald-500 border-emerald-300 shadow-[0_0_14px_rgba(16,185,129,0.8)]"
+                            : "bg-slate-950 border-slate-600 group-hover:border-slate-300"
+                      )}
                     >
                       {status.completed && !status.current ? (
                         <CheckCircle className="w-6 h-6 text-white" />
@@ -210,7 +185,6 @@ export default function ServiceProgress(props: {
                     {status.label}
                   </p>
 
-                  {/* ✅ Only show Locked/Current chips when NOT read-only */}
                   {!readOnly && locked ? (
                     <span className="mt-0.5 inline-flex items-center rounded-full bg-amber-500/90 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-950 shadow-sm">
                       Locked
