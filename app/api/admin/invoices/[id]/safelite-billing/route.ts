@@ -9,6 +9,19 @@ import {
 } from "@/lib/safelite/billing";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+function jsonNoStore(body: any, init?: ResponseInit) {
+  const headers = new Headers(init?.headers);
+  headers.set("Cache-Control", "no-store, no-cache, max-age=0, must-revalidate");
+  headers.set("Pragma", "no-cache");
+
+  return NextResponse.json(body, {
+    ...init,
+    headers,
+  });
+}
 
 async function fetchVehicleForInvoice(admin: any, invoice: any) {
   if (invoice.vehicle_id) {
@@ -79,7 +92,7 @@ export async function GET(req: Request, context: { params: Promise<{ id: string 
 
     const auth = await assertAdminRequest(req, admin);
     if (!auth.ok) {
-      return NextResponse.json({ error: auth.error }, { status: auth.status });
+      return jsonNoStore({ error: auth.error }, { status: auth.status });
     }
 
     const { id } = await context.params;
@@ -93,12 +106,12 @@ export async function GET(req: Request, context: { params: Promise<{ id: string 
       .maybeSingle();
 
     if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return jsonNoStore({ error: error.message }, { status: 500 });
     }
 
-    return NextResponse.json({ ok: true, job: job ?? null });
+    return jsonNoStore({ ok: true, job: job ?? null });
   } catch (e: any) {
-    return NextResponse.json(
+    return jsonNoStore(
       { error: e?.message || "Failed to load Safelite billing job." },
       { status: 500 }
     );
@@ -111,7 +124,7 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
 
     const auth = await assertAdminRequest(req, admin);
     if (!auth.ok) {
-      return NextResponse.json({ error: auth.error }, { status: auth.status });
+      return jsonNoStore({ error: auth.error }, { status: auth.status });
     }
 
     const { id } = await context.params;
@@ -123,11 +136,11 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
       .maybeSingle();
 
     if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return jsonNoStore({ error: error.message }, { status: 500 });
     }
 
     if (!invoice) {
-      return NextResponse.json({ error: "Invoice not found." }, { status: 404 });
+      return jsonNoStore({ error: "Invoice not found." }, { status: 404 });
     }
 
     const vehicle = await fetchVehicleForInvoice(admin, invoice);
@@ -155,11 +168,11 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
       .maybeSingle();
 
     if (existingJobError) {
-      return NextResponse.json({ error: existingJobError.message }, { status: 500 });
+      return jsonNoStore({ error: existingJobError.message }, { status: 500 });
     }
 
     if (existingJob?.status === "submitted") {
-      return NextResponse.json({
+      return jsonNoStore({
         ok: true,
         job: existingJob,
         status: "already_submitted",
@@ -170,7 +183,7 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
     }
 
     if (isFreshRunningJob(existingJob)) {
-      return NextResponse.json({
+      return jsonNoStore({
         ok: true,
         job: existingJob,
         status: "already_running",
@@ -203,10 +216,10 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
         .single();
 
       if (updateError) {
-        return NextResponse.json({ error: updateError.message }, { status: 500 });
+        return jsonNoStore({ error: updateError.message }, { status: 500 });
       }
 
-      return NextResponse.json({
+      return jsonNoStore({
         ok: validation.ok,
         job,
         status: validation.ok ? "retry_ready_for_controlled_automation" : "needs_invoice_data",
@@ -244,10 +257,10 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
       .single();
 
     if (jobError) {
-      return NextResponse.json({ error: jobError.message }, { status: 500 });
+      return jsonNoStore({ error: jobError.message }, { status: 500 });
     }
 
-    return NextResponse.json({
+    return jsonNoStore({
       ok: validation.ok,
       job,
       status: validation.ok ? "ready_for_controlled_automation" : "needs_invoice_data",
@@ -266,7 +279,7 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
       ],
     });
   } catch (e: any) {
-    return NextResponse.json(
+    return jsonNoStore(
       { error: e?.message || "Failed to prepare Safelite billing." },
       { status: 500 }
     );

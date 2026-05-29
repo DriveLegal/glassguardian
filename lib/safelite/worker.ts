@@ -29,6 +29,7 @@ type RunOptions = {
   headless?: boolean;
   allowFinalSubmit?: boolean;
   keepBrowserOpenOnReady?: boolean;
+  keepBrowserOpenOnFailure?: boolean;
 };
 
 function nowLog(message: string) {
@@ -1626,12 +1627,14 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
 	    headless = false,
 	    allowFinalSubmit = false,
 	    keepBrowserOpenOnReady = false,
+	    keepBrowserOpenOnFailure = false,
 	  } = options;
 
   const logs: any[] = [];
   const screenshots: any[] = [];
 
 	  let browser: Browser | null = null;
+	  let page: Page | null = null;
 	  let keepBrowserOpen = false;
 
   try {
@@ -1648,7 +1651,7 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
       slowMo: headless ? 0 : 150,
     });
 
-    const page = await browser.newPage({
+    page = await browser.newPage({
       viewport: {
         width: 1440,
         height: 1000,
@@ -1847,12 +1850,20 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
 	    screenshots.push(await screenshot(page, jobId, "receipt-uploaded"));
 
 	    if (!workOrderUploaded) {
+	      keepBrowserOpen = keepBrowserOpenOnFailure && !headless;
 	      return {
 	        ok: false,
 	        status: "failed",
 	        error: "Could not set uploaded document type to Work Order.",
-	        logs,
+	        logs: [
+            ...logs,
+            nowLog("Could not verify Work Order document type after upload."),
+            ...(keepBrowserOpen
+              ? [nowLog("Browser left open for admin review after failure.")]
+              : []),
+          ],
 	        screenshots,
+          browserLeftOpen: keepBrowserOpen,
 	      };
 	    }
 
@@ -1887,12 +1898,20 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
 
 	    if (submitErrors.length > 0) {
 	      screenshots.push(await screenshot(page, jobId, "submit-validation-errors"));
+	      keepBrowserOpen = keepBrowserOpenOnFailure && !headless;
 	      return {
 	        ok: false,
 	        status: "failed",
 	        error: `Safelite rejected final submit: ${submitErrors.join(" ")}`,
-	        logs: [...logs, nowLog(`Safelite final submit errors: ${submitErrors.join(" | ")}`)],
+	        logs: [
+            ...logs,
+            nowLog(`Safelite final submit errors: ${submitErrors.join(" | ")}`),
+            ...(keepBrowserOpen
+              ? [nowLog("Browser left open for admin review after failure.")]
+              : []),
+          ],
 	        screenshots,
+          browserLeftOpen: keepBrowserOpen,
 	      };
 	    }
 
@@ -1915,12 +1934,25 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
 	      screenshots,
 	    };
   } catch (e: any) {
+    if (page) {
+      const errorScreenshot = await screenshot(page, jobId, "worker-error").catch(() => null);
+      if (errorScreenshot) screenshots.push(errorScreenshot);
+    }
+    keepBrowserOpen = keepBrowserOpenOnFailure && !headless && !!browser;
+
     return {
       ok: false,
       status: "failed",
       error: e?.message || "Safelite worker failed.",
-      logs: [...logs, nowLog(e?.message || "Safelite worker failed.")],
-      screenshots,
+      logs: [
+        ...logs,
+        nowLog(e?.message || "Safelite worker failed."),
+        ...(keepBrowserOpen
+          ? [nowLog("Browser left open for admin review after failure.")]
+          : []),
+      ],
+      screenshots: screenshots.filter(Boolean),
+      browserLeftOpen: keepBrowserOpen,
     };
 	  } finally {
 	    if (browser && !keepBrowserOpen) {

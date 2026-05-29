@@ -357,7 +357,7 @@ function buildSafeliteProgress(job: SafeliteBillingJobRow | null | undefined) {
       label: "Failed",
       tone: "red",
       helpText: job.error_message || "Safelite automation failed. Check the latest worker log below.",
-      latestLog: logs[logs.length - 1]?.message || job.error_message || "Failed.",
+      latestLog: job.error_message || logs[logs.length - 1]?.message || "Failed.",
       logs,
     };
   }
@@ -895,7 +895,8 @@ export default function AdminInvoiceDetailPage() {
     const token = sessionData.session?.access_token;
     if (!token) throw new Error("Admin session is required to load Safelite billing status.");
 
-    const res = await fetch(`/api/admin/invoices/${encodeURIComponent(invoiceId)}/safelite-billing`, {
+    const res = await fetch(`/api/admin/invoices/${encodeURIComponent(invoiceId)}/safelite-billing?live=${Date.now()}`, {
+      cache: "no-store",
       headers: { Authorization: `Bearer ${token}` },
     });
 
@@ -906,7 +907,12 @@ export default function AdminInvoiceDetailPage() {
 
     return (body.job ?? null) as SafeliteBillingJobRow | null;
   },
-  refetchInterval: 5000,
+  staleTime: 0,
+  refetchInterval: 1500,
+  refetchIntervalInBackground: true,
+  refetchOnWindowFocus: "always",
+  refetchOnReconnect: "always",
+  networkMode: "always",
   retry: false,
 });
 
@@ -931,39 +937,56 @@ export default function AdminInvoiceDetailPage() {
   const [insuranceForm, setInsuranceForm] = React.useState<InsuranceFormState>(emptyInsuranceForm());
   const [insuranceErrors, setInsuranceErrors] = React.useState<InsuranceErrors>({});
   const [insuranceFormTouched, setInsuranceFormTouched] = React.useState(false);
-  const [safeliteSuccessScreenshotUrl, setSafeliteSuccessScreenshotUrl] =
-    React.useState<string | null>(null);
+  const [safeliteScreenshotUrl, setSafeliteScreenshotUrl] = React.useState<string | null>(null);
+  const [safeliteScreenshotName, setSafeliteScreenshotName] = React.useState("");
 
   React.useEffect(() => {
     let objectUrl: string | null = null;
     let cancelled = false;
 
     async function loadScreenshot() {
-      setSafeliteSuccessScreenshotUrl(null);
+      setSafeliteScreenshotUrl(null);
+      setSafeliteScreenshotName("");
 
-      if (safeliteJob?.status !== "submitted") return;
+      const job = safeliteJob;
+      if (!job) return;
 
-      const screenshots = Array.isArray(safeliteJob.screenshots_json)
-        ? safeliteJob.screenshots_json
+      const screenshots = Array.isArray(job.screenshots_json)
+        ? job.screenshots_json
         : [];
+      if (!screenshots.length) return;
+
       const screenshot =
-        [...screenshots]
-          .reverse()
-          .find((shot: any) => String(shot?.name ?? "") === "submitted") ||
-        [...screenshots].reverse()[0] ||
-        null;
+        job.status === "submitted"
+          ? [...screenshots]
+              .reverse()
+              .find((shot: any) => String(shot?.name ?? "") === "submitted") ||
+            [...screenshots].reverse()[0] ||
+            null
+          : [...screenshots]
+              .reverse()
+              .find((shot: any) =>
+                ["receipt-uploaded", "upload-page", "parts-validation-errors", "labor-filled"].includes(
+                  String(shot?.name ?? "")
+                )
+              ) ||
+            [...screenshots].reverse()[0] ||
+            null;
 
       const artifactPath = String(screenshot?.storage_path ?? screenshot?.filePath ?? "");
       const filename = artifactPath.split("/").filter(Boolean).pop();
-      if (!safeliteJob.id || !filename) return;
+      if (!job.id || !filename) return;
 
       const { data: sessionData } = await supabaseClient.auth.getSession();
       const token = sessionData.session?.access_token;
       if (!token) return;
 
       const res = await fetch(
-        `/api/admin/safelite-billing/jobs/${encodeURIComponent(safeliteJob.id)}/screenshots/${encodeURIComponent(filename)}`,
-        { headers: { Authorization: `Bearer ${token}` } }
+        `/api/admin/safelite-billing/jobs/${encodeURIComponent(job.id)}/screenshots/${encodeURIComponent(filename)}`,
+        {
+          cache: "no-store",
+          headers: { Authorization: `Bearer ${token}` },
+        }
       );
 
       if (!res.ok) return;
@@ -972,7 +995,8 @@ export default function AdminInvoiceDetailPage() {
       if (cancelled) return;
 
       objectUrl = URL.createObjectURL(blob);
-      setSafeliteSuccessScreenshotUrl(objectUrl);
+      setSafeliteScreenshotName(String(screenshot?.name ?? "latest screenshot"));
+      setSafeliteScreenshotUrl(objectUrl);
     }
 
     loadScreenshot().catch(() => {});
@@ -1899,35 +1923,65 @@ export default function AdminInvoiceDetailPage() {
           </Card>
         ) : null}
 
-	        {safeliteJob?.status === "submitted" ? (
-	          <Card className="overflow-hidden border border-emerald-400/25 bg-emerald-500/10 backdrop-blur-2xl shadow-[0_24px_70px_rgba(0,0,0,0.36)] print:hidden">
+	        {safeliteJob?.status === "submitted" || safeliteJob?.status === "failed" ? (
+	          <Card
+              className={cx(
+                "overflow-hidden backdrop-blur-2xl shadow-[0_24px_70px_rgba(0,0,0,0.36)] print:hidden",
+                safeliteJob?.status === "submitted"
+                  ? "border border-emerald-400/25 bg-emerald-500/10"
+                  : "border border-red-400/25 bg-red-500/10"
+              )}
+            >
 	            <CardHeader className="pb-3">
 	              <CardTitle className="flex items-center gap-2 text-slate-50">
-	                <CheckCircle className="h-5 w-5 text-emerald-300" />
-	                Safelite Submission Proof
+	                {safeliteJob?.status === "submitted" ? (
+                    <CheckCircle className="h-5 w-5 text-emerald-300" />
+                  ) : (
+                    <X className="h-5 w-5 text-red-300" />
+                  )}
+	                {safeliteJob?.status === "submitted"
+                    ? "Safelite Submission Proof"
+                    : "Safelite Failure Screenshot"}
 	              </CardTitle>
 	            </CardHeader>
 	            <CardContent className="space-y-3">
-	              <div className="flex flex-wrap items-center gap-3 text-sm text-emerald-100">
-	                <span>Submitted successfully.</span>
-	                {safeliteJob.confirmation_number ? (
+	              <div
+                  className={cx(
+                    "flex flex-wrap items-center gap-3 text-sm",
+                    safeliteJob?.status === "submitted" ? "text-emerald-100" : "text-red-100"
+                  )}
+                >
+	                <span>
+                    {safeliteJob?.status === "submitted"
+                      ? "Submitted successfully."
+                      : safeliteJob?.error_message || "Safelite automation failed before final submit."}
+                  </span>
+	                {safeliteJob?.confirmation_number ? (
 	                  <span className="font-semibold">
 	                    Confirmation: {safeliteJob.confirmation_number}
 	                  </span>
 	                ) : null}
 	              </div>
 
-	              {safeliteSuccessScreenshotUrl ? (
+                {safeliteScreenshotName ? (
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-slate-400">
+                    Screenshot: {safeliteScreenshotName}
+                  </div>
+                ) : null}
+
+	              {safeliteScreenshotUrl ? (
 	                <div className="overflow-hidden rounded-xl border border-white/10 bg-black/20">
 	                  <img
-	                    src={safeliteSuccessScreenshotUrl}
-	                    alt="Safelite successful submission screenshot"
+	                    src={safeliteScreenshotUrl}
+	                    alt="Safelite worker screenshot"
 	                    className="block max-h-[520px] w-full object-contain"
 	                  />
 	                </div>
 	              ) : (
 	                <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-slate-300">
-	                  Loading submission screenshot...
+	                  {safeliteJob?.status === "submitted"
+                      ? "Loading submission screenshot..."
+                      : "No failure screenshot was attached yet."}
 	                </div>
 	              )}
 	            </CardContent>

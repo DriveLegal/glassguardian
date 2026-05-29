@@ -65,6 +65,8 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
     const body = await req.json().catch(() => ({}));
     const dryRun = url.searchParams.get("dryRun") === "1" || body?.dryRun === true;
     const allowFinalSubmit = body?.allowFinalSubmit === false ? false : !dryRun;
+    const keepBrowserOpenOnFailure =
+      body?.keepBrowserOpenOnFailure === true || dryRun;
 
     const { data: job, error } = await admin
       .from("safelite_billing_jobs")
@@ -104,6 +106,7 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
       headless: false,
       allowFinalSubmit,
       keepBrowserOpenOnReady: dryRun,
+      keepBrowserOpenOnFailure,
     });
 
     const mergedLogs = [

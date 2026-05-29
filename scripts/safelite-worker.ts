@@ -27,6 +27,7 @@ const workerId = process.env.SAFELITE_WORKER_ID || `${os.hostname()}-${process.p
 const pollMs = Number(process.env.SAFELITE_WORKER_POLL_MS || 5000);
 const headless = process.env.SAFELITE_HEADLESS !== "false";
 const allowFinalSubmit = process.env.SAFELITE_ALLOW_FINAL_SUBMIT === "true";
+const keepBrowserOpenOnFailure = process.env.SAFELITE_KEEP_BROWSER_OPEN_ON_FAILURE === "true";
 const runOnce = process.argv.includes("--once");
 
 function assertConfigured() {
@@ -163,6 +164,7 @@ async function processOneJob() {
       payload: job.payload_json,
       headless,
       allowFinalSubmit,
+      keepBrowserOpenOnFailure,
     });
   } catch (e: any) {
     result = {
@@ -207,7 +209,9 @@ async function main() {
   console.log(
     `[safelite-worker] starting ${workerId} against ${apiBaseUrl}; final submit ${
       allowFinalSubmit ? "enabled" : "disabled"
-    }; headless ${headless ? "enabled" : "disabled"}; token length ${workerToken.length}; token fingerprint ${tokenFingerprint(workerToken)}`
+    }; headless ${headless ? "enabled" : "disabled"}; failure browser review ${
+      keepBrowserOpenOnFailure ? "enabled" : "disabled"
+    }; token length ${workerToken.length}; token fingerprint ${tokenFingerprint(workerToken)}`
   );
 
   await verifyWorkerAuth();
