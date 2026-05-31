@@ -30,6 +30,8 @@ type RunOptions = {
   allowFinalSubmit?: boolean;
   keepBrowserOpenOnReady?: boolean;
   keepBrowserOpenOnFailure?: boolean;
+  onLog?: (entry: { at: string; message: string }) => void | Promise<void>;
+  onScreenshot?: (screenshot: any) => any | Promise<any>;
 };
 
 function nowLog(message: string) {
@@ -751,6 +753,29 @@ async function readSafeliteValidationErrors(page: Page) {
     });
 }
 
+function isPostSubmitRequiredInfoReset(finalText: string, submitErrors: string[]) {
+  if (!submitErrors.length) return false;
+
+  const onlyGenericRequiredInfo = submitErrors.every((line) => {
+    const normalized = String(line || "")
+      .replace(/^\*+/, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+
+    return normalized === "required information" || normalized === "required";
+  });
+
+  if (!onlyGenericRequiredInfo) return false;
+
+  const text = String(finalText || "").toLowerCase();
+  return (
+    text.includes("create invoice") &&
+    text.includes("referral information") &&
+    text.includes("work order information")
+  );
+}
+
 async function selectPartByText(page: Page, visibleText: string) {
   async function partSelectionLooksSelected() {
     return await page.evaluate((visibleText) => {
@@ -1463,10 +1488,7 @@ async function documentTypeSelectionLooksCorrect(page: Page, documentType: strin
           ""
         );
 
-        if (
-          selectedText.indexOf(wanted) !== -1 &&
-          (context.indexOf("document type") !== -1 || context.indexOf(wanted) !== -1)
-        ) {
+        if (selectedText.indexOf(wanted) !== -1) {
           return true;
         }
       }
@@ -1495,6 +1517,755 @@ async function documentTypeSelectionLooksCorrect(page: Page, documentType: strin
     `,
     documentType
   );
+}
+
+async function findUploadedDocumentTypeSelect(page: Page, documentType: string) {
+  return await evaluateInBrowser<{
+    index: number;
+    value: string;
+    optionIndex: number;
+  } | null>(
+    page,
+    `
+      var wanted = String(arg || "").toLowerCase().replace(/\\s+/g, " ").trim();
+
+      function clean(value) {
+        return String(value || "").toLowerCase().replace(/\\s+/g, " ").trim();
+      }
+
+      function isVisible(node) {
+        if (!node || !node.getBoundingClientRect) return false;
+        var rect = node.getBoundingClientRect();
+        var style = window.getComputedStyle(node);
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden"
+        );
+      }
+
+      var selects = Array.prototype.slice.call(document.querySelectorAll("select"));
+      var ranked = [];
+
+      for (var selectIndex = 0; selectIndex < selects.length; selectIndex += 1) {
+        var select = selects[selectIndex];
+        if (!isVisible(select) || select.disabled) continue;
+
+        var options = Array.prototype.slice.call(select.options);
+        var option = options.find(function(item) {
+          return clean(item.textContent).indexOf(wanted) !== -1;
+        });
+
+        if (!option) continue;
+
+        var context = clean(
+          [
+            select.id || "",
+            select.name || "",
+            select.getAttribute("aria-label") || "",
+            select.closest("label") && select.closest("label").textContent || "",
+            select.closest("tr") && select.closest("tr").textContent || "",
+            select.closest("[role='row']") && select.closest("[role='row']").textContent || "",
+            select.closest("div") && select.closest("div").textContent || "",
+            select.parentElement && select.parentElement.textContent || ""
+          ].join(" ")
+        );
+
+        var score = 0;
+        if (context.indexOf("document type") !== -1) score += 100;
+        if (context.indexOf("supporting documentation") !== -1) score += 40;
+        if (context.indexOf(".pdf") !== -1 || context.indexOf(".png") !== -1 || context.indexOf(".jpg") !== -1) score += 30;
+        if (context.indexOf("work order") !== -1) score += 10;
+
+        ranked.push({
+          index: selectIndex,
+          value: option.value,
+          optionIndex: options.indexOf(option),
+          score: score
+        });
+      }
+
+      ranked.sort(function(a, b) {
+        return b.score - a.score;
+      });
+
+      return ranked[0] || null;
+    `,
+    documentType
+  );
+}
+
+async function selectUploadedDocumentTypeNative(page: Page, documentType: string) {
+  const candidate = await findUploadedDocumentTypeSelect(page, documentType).catch(() => null);
+  if (!candidate) return false;
+
+  const select = page.locator("select").nth(candidate.index);
+  await select.scrollIntoViewIfNeeded().catch(() => {});
+  await select.focus().catch(() => {});
+
+  try {
+    if (candidate.value) {
+      await select.selectOption({ value: candidate.value }, { timeout: 4000 });
+    } else {
+      await select.selectOption({ index: candidate.optionIndex }, { timeout: 4000 });
+    }
+  } catch {
+    await select.evaluate((el, candidate) => {
+      const selectEl = el as HTMLSelectElement;
+      selectEl.selectedIndex = candidate.optionIndex;
+      selectEl.value = candidate.value;
+    }, candidate);
+  }
+
+  await select.evaluate((el) => {
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    el.dispatchEvent(new Event("blur", { bubbles: true }));
+    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+  });
+
+  await page.keyboard.press("Enter").catch(() => {});
+  await wait(250);
+  await page.keyboard.press("Tab").catch(() => {});
+  await wait(250);
+  await page.mouse.click(20, 20).catch(() => {});
+  await wait(1000);
+
+  return await documentTypeSelectionLooksCorrect(page, documentType);
+}
+
+async function clickUploadedDocumentTypeLikeUser(page: Page, documentType: string) {
+  const opened = await evaluateInBrowser<{ x: number; y: number } | null>(
+    page,
+    `
+      var wanted = String(arg || "").toLowerCase().replace(/\\s+/g, " ").trim();
+
+      function clean(value) {
+        return String(value || "").toLowerCase().replace(/\\s+/g, " ").trim();
+      }
+
+      function isVisible(node) {
+        if (!node || !node.getBoundingClientRect) return false;
+        var rect = node.getBoundingClientRect();
+        var style = window.getComputedStyle(node);
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden"
+        );
+      }
+
+      var controls = Array.prototype.slice.call(
+        document.querySelectorAll("select, button, [role='combobox'], [aria-haspopup='listbox'], .select2-selection, .dropdown-toggle, [class*='select']")
+      );
+      var ranked = [];
+
+      for (var i = 0; i < controls.length; i += 1) {
+        var control = controls[i];
+        if (!isVisible(control)) continue;
+
+        var context = clean(
+          [
+            control.id || "",
+            control.getAttribute("name") || "",
+            control.getAttribute("aria-label") || "",
+            control.innerText || "",
+            control.textContent || "",
+            control.closest("label") && control.closest("label").textContent || "",
+            control.closest("tr") && control.closest("tr").textContent || "",
+            control.closest("div") && control.closest("div").textContent || "",
+            control.parentElement && control.parentElement.textContent || ""
+          ].join(" ")
+        );
+
+        var score = 0;
+        if (context.indexOf("document type") !== -1) score += 100;
+        if (context.indexOf("supporting documentation") !== -1) score += 40;
+        if (context.indexOf(".pdf") !== -1 || context.indexOf(".png") !== -1 || context.indexOf(".jpg") !== -1) score += 30;
+        if (context.indexOf(wanted) !== -1) score += 15;
+        if (score <= 0) continue;
+
+        var rect = control.getBoundingClientRect();
+        ranked.push({
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          score: score
+        });
+      }
+
+      ranked.sort(function(a, b) {
+        return b.score - a.score;
+      });
+
+      return ranked[0] || null;
+    `,
+    documentType
+  ).catch(() => null);
+
+  if (!opened) return false;
+
+  await page.mouse.click(opened.x, opened.y).catch(() => {});
+  await wait(750);
+
+  const clickedOption = await page
+    .getByText(documentType, { exact: true })
+    .last()
+    .click({ timeout: 2500 })
+    .then(() => true)
+    .catch(() => false);
+
+  if (!clickedOption) {
+    await page.keyboard.press("ArrowDown").catch(() => {});
+    await wait(150);
+    await page.keyboard.press("Enter").catch(() => {});
+  }
+
+  await wait(250);
+  await page.keyboard.press("Tab").catch(() => {});
+  await wait(250);
+  await page.mouse.click(20, 20).catch(() => {});
+  await wait(1000);
+
+  return await documentTypeSelectionLooksCorrect(page, documentType);
+}
+
+function compactLogText(value: string, maxLength = 700) {
+  const compact = String(value || "").replace(/\s+/g, " ").trim();
+  return compact.length > maxLength ? `${compact.slice(0, maxLength)}...` : compact;
+}
+
+async function summarizeVisibleDocumentTypeSelects(page: Page) {
+  const summary = await evaluateInBrowser<{
+    count: number;
+    items: Array<{
+      index: number;
+      selectedText: string;
+      optionTexts: string[];
+      context: string;
+    }>;
+  }>(
+    page,
+    `
+      function clean(value) {
+        return String(value || "").replace(/\\s+/g, " ").trim();
+      }
+
+      function isVisible(node) {
+        if (!node || !node.getBoundingClientRect) return false;
+        var rect = node.getBoundingClientRect();
+        var style = window.getComputedStyle(node);
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden"
+        );
+      }
+
+      var selects = Array.prototype.slice.call(document.querySelectorAll("select"));
+      var items = [];
+
+      for (var i = 0; i < selects.length; i += 1) {
+        var select = selects[i];
+        if (!isVisible(select)) continue;
+
+        var selectedOption = select.options[select.selectedIndex];
+        var optionTexts = Array.prototype.slice.call(select.options)
+          .map(function(option) { return clean(option.textContent); })
+          .filter(Boolean);
+        var context = clean(
+          [
+            select.id || "",
+            select.name || "",
+            select.getAttribute("aria-label") || "",
+            select.closest("label") && select.closest("label").textContent || "",
+            select.closest("tr") && select.closest("tr").textContent || "",
+            select.closest("[role='row']") && select.closest("[role='row']").textContent || "",
+            select.closest("div") && select.closest("div").textContent || "",
+            select.parentElement && select.parentElement.textContent || ""
+          ].join(" ")
+        ).slice(0, 240);
+
+        items.push({
+          index: i,
+          selectedText: clean(selectedOption && selectedOption.textContent),
+          optionTexts: optionTexts.slice(0, 10),
+          context: context
+        });
+      }
+
+      return { count: items.length, items: items };
+    `
+  ).catch(() => ({ count: 0, items: [] }));
+
+  if (!summary.items.length) return "0 visible select(s).";
+
+  return `${summary.count} visible select(s): ${summary.items
+    .map((item) =>
+      `#${item.index} selected="${item.selectedText || "(blank)"}" options="${item.optionTexts.join(
+        " | "
+      )}" context="${item.context}"`
+    )
+    .join("; ")}`;
+}
+
+async function waitForUploadedDocumentRow(page: Page, fileName: string) {
+  const baseName = path.basename(fileName || "");
+  const firstNeedle = baseName.slice(0, Math.min(28, baseName.length)).toLowerCase();
+  const genericNeedles = ["document type for", "upload supporting documentation", ".pdf"];
+
+  return await page
+    .waitForFunction(
+      ({ firstNeedle, genericNeedles }) => {
+        const text = String(document.body?.innerText || "").toLowerCase();
+        const hasGeneric = genericNeedles.some((needle) => text.includes(needle));
+        return hasGeneric && (!firstNeedle || text.includes(firstNeedle) || text.includes(".pdf"));
+      },
+      { firstNeedle, genericNeedles },
+      { timeout: 60_000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+}
+
+async function setDocumentTypeOnUploadedRowSelect(
+  page: Page,
+  documentType: string,
+  fileName: string
+) {
+  return await evaluateInBrowser<{
+    ok: boolean;
+    visibleSelectCount: number;
+    chosenIndex: number | null;
+    chosenScore: number;
+    selectedText: string;
+    optionTexts: string[];
+    context: string;
+    reason?: string;
+  }>(
+    page,
+    `
+      var wanted = String(arg.documentType || "").toLowerCase().replace(/\\s+/g, " ").trim();
+      var fileName = String(arg.fileName || "").toLowerCase();
+      var fileBase = fileName.replace(/\\.[a-z0-9]+$/i, "");
+      var fileNeedles = [
+        fileName,
+        fileBase,
+        fileBase.slice(0, 30),
+        "glassguardian",
+        "safelite-workorder",
+        ".pdf"
+      ].filter(function(item) {
+        return item && item.length >= 4;
+      });
+
+      function clean(value) {
+        return String(value || "").toLowerCase().replace(/\\s+/g, " ").trim();
+      }
+
+      function cleanDisplay(value) {
+        return String(value || "").replace(/\\s+/g, " ").trim();
+      }
+
+      function isVisible(node) {
+        if (!node || !node.getBoundingClientRect) return false;
+        var rect = node.getBoundingClientRect();
+        var style = window.getComputedStyle(node);
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden"
+        );
+      }
+
+      function selectContext(select) {
+        var chunks = [
+          select.id || "",
+          select.name || "",
+          select.getAttribute("aria-label") || "",
+          select.closest("label") && select.closest("label").textContent || "",
+          select.closest("tr") && select.closest("tr").textContent || "",
+          select.closest("[role='row']") && select.closest("[role='row']").textContent || "",
+          select.closest("li") && select.closest("li").textContent || "",
+          select.closest("section") && select.closest("section").textContent || "",
+          select.closest("fieldset") && select.closest("fieldset").textContent || "",
+          select.closest("div") && select.closest("div").textContent || "",
+          select.parentElement && select.parentElement.textContent || ""
+        ];
+
+        return clean(chunks.join(" "));
+      }
+
+      var selects = Array.prototype.slice.call(document.querySelectorAll("select"));
+      var visibleSelects = selects.filter(function(select) {
+        return isVisible(select) && !select.disabled;
+      });
+      var ranked = [];
+
+      for (var i = 0; i < visibleSelects.length; i += 1) {
+        var select = visibleSelects[i];
+        var options = Array.prototype.slice.call(select.options);
+        var option = options.find(function(item) {
+          return clean(item.textContent).indexOf(wanted) !== -1;
+        });
+        if (!option) continue;
+
+        var context = selectContext(select);
+        var score = 0;
+        if (context.indexOf("document type") !== -1) score += 120;
+        if (context.indexOf("document type for") !== -1) score += 80;
+        if (context.indexOf("supporting documentation") !== -1) score += 40;
+        if (context.indexOf("work order") !== -1) score += 20;
+        if (context.indexOf("select") !== -1) score += 5;
+
+        for (var needleIndex = 0; needleIndex < fileNeedles.length; needleIndex += 1) {
+          if (context.indexOf(fileNeedles[needleIndex]) !== -1) {
+            score += 100;
+            break;
+          }
+        }
+
+        if (score <= 0) score = 1;
+
+        ranked.push({
+          select: select,
+          option: option,
+          optionIndex: options.indexOf(option),
+          selectIndex: selects.indexOf(select),
+          score: score,
+          context: context,
+          optionTexts: options.map(function(item) { return cleanDisplay(item.textContent); }).filter(Boolean)
+        });
+      }
+
+      ranked.sort(function(a, b) {
+        return b.score - a.score;
+      });
+
+      var winner = ranked[0];
+      if (!winner) {
+        return {
+          ok: false,
+          visibleSelectCount: visibleSelects.length,
+          chosenIndex: null,
+          chosenScore: 0,
+          selectedText: "",
+          optionTexts: [],
+          context: "",
+          reason: "No visible select had a Work Order option."
+        };
+      }
+
+      winner.select.scrollIntoView({ block: "center", inline: "center" });
+      winner.select.focus();
+
+      var valueSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value");
+      if (valueSetter && valueSetter.set) {
+        valueSetter.set.call(winner.select, winner.option.value);
+      } else {
+        winner.select.value = winner.option.value;
+      }
+
+      winner.select.selectedIndex = winner.optionIndex;
+      winner.option.selected = true;
+
+      winner.select.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      winner.select.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      winner.select.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      winner.select.dispatchEvent(new Event("input", { bubbles: true }));
+      winner.select.dispatchEvent(new Event("change", { bubbles: true }));
+      winner.select.dispatchEvent(new Event("blur", { bubbles: true }));
+      winner.select.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+
+      var selectedOption = winner.select.options[winner.select.selectedIndex];
+      var selectedText = cleanDisplay(selectedOption && selectedOption.textContent);
+
+      return {
+        ok: clean(selectedText).indexOf(wanted) !== -1,
+        visibleSelectCount: visibleSelects.length,
+        chosenIndex: winner.selectIndex,
+        chosenScore: winner.score,
+        selectedText: selectedText,
+        optionTexts: winner.optionTexts.slice(0, 10),
+        context: winner.context.slice(0, 300)
+      };
+    `,
+    { documentType, fileName }
+  );
+}
+
+async function verifyUploadedDocumentTypeSelect(
+  page: Page,
+  documentType: string,
+  fileName: string
+) {
+  return await evaluateInBrowser<boolean>(
+    page,
+    `
+      var wanted = String(arg.documentType || "").toLowerCase().replace(/\\s+/g, " ").trim();
+      var fileName = String(arg.fileName || "").toLowerCase();
+      var fileBase = fileName.replace(/\\.[a-z0-9]+$/i, "");
+      var fileNeedles = [
+        fileName,
+        fileBase,
+        fileBase.slice(0, 30),
+        "glassguardian",
+        "safelite-workorder",
+        ".pdf"
+      ].filter(function(item) {
+        return item && item.length >= 4;
+      });
+
+      function clean(value) {
+        return String(value || "").toLowerCase().replace(/\\s+/g, " ").trim();
+      }
+
+      function isVisible(node) {
+        if (!node || !node.getBoundingClientRect) return false;
+        var rect = node.getBoundingClientRect();
+        var style = window.getComputedStyle(node);
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden"
+        );
+      }
+
+      var selects = Array.prototype.slice.call(document.querySelectorAll("select"));
+      for (var i = 0; i < selects.length; i += 1) {
+        var select = selects[i];
+        if (!isVisible(select) || select.disabled) continue;
+
+        var selectedOption = select.options[select.selectedIndex];
+        var selectedText = clean(selectedOption && selectedOption.textContent);
+        if (selectedText.indexOf(wanted) === -1) continue;
+
+        var context = clean(
+          [
+            select.id || "",
+            select.name || "",
+            select.getAttribute("aria-label") || "",
+            select.closest("label") && select.closest("label").textContent || "",
+            select.closest("tr") && select.closest("tr").textContent || "",
+            select.closest("[role='row']") && select.closest("[role='row']").textContent || "",
+            select.closest("li") && select.closest("li").textContent || "",
+            select.closest("section") && select.closest("section").textContent || "",
+            select.closest("fieldset") && select.closest("fieldset").textContent || "",
+            select.closest("div") && select.closest("div").textContent || "",
+            select.parentElement && select.parentElement.textContent || ""
+          ].join(" ")
+        );
+
+        var hasDocumentContext = context.indexOf("document type") !== -1;
+        var hasFileContext = fileNeedles.some(function(needle) {
+          return context.indexOf(needle) !== -1;
+        });
+
+        if (hasDocumentContext || hasFileContext) return true;
+      }
+
+      return false;
+    `,
+    { documentType, fileName }
+  ).catch(() => false);
+}
+
+async function customUploadedDocumentTypeLooksCorrect(page: Page, documentType: string) {
+  return await evaluateInBrowser<boolean>(
+    page,
+    `
+      var wanted = String(arg || "").toLowerCase().replace(/\\s+/g, " ").trim();
+
+      function clean(value) {
+        return String(value || "").toLowerCase().replace(/\\s+/g, " ").trim();
+      }
+
+      function isVisible(node) {
+        if (!node || !node.getBoundingClientRect) return false;
+        var rect = node.getBoundingClientRect();
+        var style = window.getComputedStyle(node);
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden"
+        );
+      }
+
+      var controls = Array.prototype.slice.call(
+        document.querySelectorAll("button, [role='combobox'], [aria-haspopup='listbox'], .select2-selection, .dropdown-toggle, [class*='select'], input[readonly], div, span")
+      );
+
+      for (var i = 0; i < controls.length; i += 1) {
+        var control = controls[i];
+        if (!isVisible(control)) continue;
+
+        var text = clean(control.innerText || control.textContent || control.getAttribute("value") || control.getAttribute("aria-label"));
+        if (text !== wanted) continue;
+        if (text.length > 80) continue;
+
+        var context = clean(
+          [
+            control.closest("label") && control.closest("label").textContent || "",
+            control.closest("tr") && control.closest("tr").textContent || "",
+            control.closest("[role='row']") && control.closest("[role='row']").textContent || "",
+            control.closest("li") && control.closest("li").textContent || "",
+            control.closest("section") && control.closest("section").textContent || "",
+            control.closest("fieldset") && control.closest("fieldset").textContent || "",
+            control.closest("div") && control.closest("div").textContent || "",
+            control.parentElement && control.parentElement.textContent || ""
+          ].join(" ")
+        );
+
+        if (
+          context.indexOf("document type") !== -1 ||
+          context.indexOf("upload supporting documentation") !== -1 ||
+          context.indexOf(".pdf") !== -1 ||
+          context.indexOf("submit") !== -1
+        ) {
+          return true;
+        }
+      }
+
+      return false;
+    `,
+    documentType
+  ).catch(() => false);
+}
+
+async function clickCustomUploadedDocumentType(
+  page: Page,
+  documentType: string,
+  fileName: string
+) {
+  const clickedControl = await evaluateInBrowser<{ x: number; y: number; text: string } | null>(
+    page,
+    `
+      var fileName = String(arg.fileName || "").toLowerCase();
+      var fileBase = fileName.replace(/\\.[a-z0-9]+$/i, "");
+      var fileNeedles = [
+        fileName,
+        fileBase,
+        fileBase.slice(0, 30),
+        "glassguardian",
+        "safelite-workorder",
+        ".pdf"
+      ].filter(function(item) {
+        return item && item.length >= 4;
+      });
+
+      function clean(value) {
+        return String(value || "").toLowerCase().replace(/\\s+/g, " ").trim();
+      }
+
+      function display(value) {
+        return String(value || "").replace(/\\s+/g, " ").trim();
+      }
+
+      function isVisible(node) {
+        if (!node || !node.getBoundingClientRect) return false;
+        var rect = node.getBoundingClientRect();
+        var style = window.getComputedStyle(node);
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden"
+        );
+      }
+
+      var candidates = Array.prototype.slice.call(
+        document.querySelectorAll("button, [role='combobox'], [aria-haspopup='listbox'], .select2-selection, .dropdown-toggle, [class*='select'], input[readonly], div, span")
+      );
+      var ranked = [];
+
+      for (var i = 0; i < candidates.length; i += 1) {
+        var node = candidates[i];
+        if (!isVisible(node)) continue;
+
+        var text = clean(node.innerText || node.textContent || node.getAttribute("value") || node.getAttribute("aria-label"));
+        if (text !== "select") continue;
+
+        var rect = node.getBoundingClientRect();
+        if (rect.width < 40 || rect.height < 10) continue;
+
+        var context = clean(
+          [
+            node.id || "",
+            node.getAttribute("name") || "",
+            node.getAttribute("aria-label") || "",
+            node.closest("label") && node.closest("label").textContent || "",
+            node.closest("tr") && node.closest("tr").textContent || "",
+            node.closest("[role='row']") && node.closest("[role='row']").textContent || "",
+            node.closest("li") && node.closest("li").textContent || "",
+            node.closest("section") && node.closest("section").textContent || "",
+            node.closest("fieldset") && node.closest("fieldset").textContent || "",
+            node.closest("div") && node.closest("div").textContent || "",
+            node.parentElement && node.parentElement.textContent || ""
+          ].join(" ")
+        );
+
+        var score = 0;
+        if (context.indexOf("document type") !== -1) score += 100;
+        if (context.indexOf("upload supporting documentation") !== -1) score += 40;
+        if (context.indexOf(".pdf") !== -1) score += 40;
+        for (var needleIndex = 0; needleIndex < fileNeedles.length; needleIndex += 1) {
+          if (context.indexOf(fileNeedles[needleIndex]) !== -1) {
+            score += 80;
+            break;
+          }
+        }
+
+        ranked.push({
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          text: display(node.innerText || node.textContent || node.getAttribute("value") || node.getAttribute("aria-label")),
+          score: score
+        });
+      }
+
+      ranked.sort(function(a, b) {
+        return b.score - a.score;
+      });
+
+      return ranked[0] || null;
+    `,
+    { documentType, fileName }
+  ).catch(() => null);
+
+  if (clickedControl) {
+    await page.mouse.click(clickedControl.x, clickedControl.y).catch(() => {});
+  } else {
+    await page.getByText("Select", { exact: true }).last().click({ timeout: 10_000 });
+  }
+
+  await wait(600);
+
+  const optionClicked = await page
+    .getByText(documentType, { exact: true })
+    .last()
+    .click({ timeout: 10_000 })
+    .then(() => true)
+    .catch(() => false);
+
+  if (!optionClicked) {
+    await page.keyboard.press("ArrowDown").catch(() => {});
+    await wait(150);
+    await page.keyboard.press("Enter").catch(() => {});
+  }
+
+  await wait(1000);
+  await page.keyboard.press("Tab").catch(() => {});
+  await wait(500);
+
+  return await customUploadedDocumentTypeLooksCorrect(page, documentType);
 }
 
 async function forceSelectUploadedDocumentType(page: Page, documentType: string) {
@@ -1580,12 +2351,17 @@ async function forceSelectUploadedDocumentType(page: Page, documentType: string)
 async function selectDocumentType(page: Page, documentType: string) {
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const selected =
-      (await selectFirst(page, ["Document Type", "Document type", "Type"], documentType).catch(() => false)) ||
+      (await selectUploadedDocumentTypeNative(page, documentType).catch(() => false)) ||
       (await forceSelectUploadedDocumentType(page, documentType).catch(() => false)) ||
+      (await clickUploadedDocumentTypeLikeUser(page, documentType).catch(() => false)) ||
+      (await selectFirst(page, ["Document Type", "Document type", "Type"], documentType).catch(() => false)) ||
       (await selectNativeOptionByText(page, documentType).catch(() => false)) ||
       (await selectOptionByText(page, documentType).catch(() => false));
 
     if (selected) {
+      await page.keyboard.press("Enter").catch(() => {});
+      await wait(250);
+      await page.keyboard.press("Escape").catch(() => {});
       await wait(900);
       if (await documentTypeSelectionLooksCorrect(page, documentType)) return true;
     }
@@ -1593,30 +2369,128 @@ async function selectDocumentType(page: Page, documentType: string) {
     await wait(1500);
   }
 
-  return false;
+  return await documentTypeSelectionLooksCorrect(page, documentType);
 }
 
-async function uploadWorkOrder(page: Page, receiptPdfPath: string, documentType: string) {
+async function uploadWorkOrder(
+  page: Page,
+  receiptPdfPath: string,
+  documentType: string,
+  hooks?: {
+    log?: (message: string) => any | Promise<any>;
+    capture?: (name: string) => any | Promise<any>;
+  }
+) {
+  const log = async (message: string) => {
+    await hooks?.log?.(message).catch(() => {});
+  };
+
+  const capture = async (name: string) => {
+    await hooks?.capture?.(name).catch(() => {});
+  };
+
+  const receiptFileName = path.basename(receiptPdfPath);
+  const fileInputCount = await page.locator('input[type="file"]').count().catch(() => 0);
+  await log(`Found ${fileInputCount} Safelite file upload input(s).`);
+
+  if (fileInputCount < 1) {
+    await log("No Safelite file input was available on the upload page.");
+    return false;
+  }
+
   const fileInput = page.locator('input[type="file"]').first();
   await fileInput.setInputFiles(receiptPdfPath);
+  await log(`Set receipt PDF on Safelite file input: ${receiptFileName}.`);
 
-  await page
-    .waitForFunction(
-      () => {
-        const text = String(document.body?.innerText || "").toLowerCase();
-        return text.includes("document type") || text.includes("upload supporting documentation");
-      },
-      null,
-      { timeout: 20_000 }
-    )
-    .catch(() => {});
+  const rowReady = await waitForUploadedDocumentRow(page, receiptFileName);
+  await log(
+    rowReady
+      ? `Uploaded document row appeared for ${receiptFileName}.`
+      : `Uploaded document row was not confirmed for ${receiptFileName}; trying document type selection anyway.`
+  );
 
-  await wait(2500);
+  await wait(1500);
+  await log(
+    `Visible document type selects before selection: ${compactLogText(
+      await summarizeVisibleDocumentTypeSelects(page)
+    )}`
+  );
 
-  const documentTypeSelected = await selectDocumentType(page, documentType);
-  await wait(1000);
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const customSelected = await clickCustomUploadedDocumentType(
+      page,
+      documentType,
+      receiptFileName
+    ).catch((e: any) => {
+      void log(`Custom document type attempt ${attempt} failed: ${e?.message || e}`);
+      return false;
+    });
 
-  return documentTypeSelected;
+    if (customSelected) {
+      await log(`Selected ${documentType} from Safelite custom document type dropdown.`);
+      await capture("work-order-document-type-selected");
+      return true;
+    }
+
+    const result = await setDocumentTypeOnUploadedRowSelect(
+      page,
+      documentType,
+      receiptFileName
+    ).catch((e: any) => ({
+      ok: false,
+      visibleSelectCount: 0,
+      chosenIndex: null,
+      chosenScore: 0,
+      selectedText: "",
+      optionTexts: [],
+      context: "",
+      reason: e?.message || "Document type selection script failed.",
+    }));
+
+    await log(
+      result.ok
+        ? `Selected ${documentType} on uploaded document select #${result.chosenIndex} (score ${result.chosenScore}).`
+        : `Document type attempt ${attempt} did not stick: ${
+            result.reason || `selected="${result.selectedText || "(blank)"}"`
+          }`
+    );
+
+    if (result.optionTexts?.length) {
+      await log(
+        `Document type select #${result.chosenIndex ?? "?"} options: ${compactLogText(
+          result.optionTexts.join(" | "),
+          500
+        )}`
+      );
+    }
+
+    if (result.context) {
+      await log(
+        `Document type select #${result.chosenIndex ?? "?"} context: ${compactLogText(
+          result.context,
+          500
+        )}`
+      );
+    }
+
+    await wait(1000);
+
+    if (result.ok && (await verifyUploadedDocumentTypeSelect(page, documentType, receiptFileName))) {
+      await capture("work-order-document-type-selected");
+      return true;
+    }
+
+    await wait(750);
+  }
+
+  await log(
+    `Document type verification failed. Visible document type selects after attempts: ${compactLogText(
+      await summarizeVisibleDocumentTypeSelects(page),
+      900
+    )}`
+  );
+
+  return false;
 }
 
 export async function runSafeliteBillingWorker(options: RunOptions) {
@@ -1628,6 +2502,8 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
 	    allowFinalSubmit = false,
 	    keepBrowserOpenOnReady = false,
 	    keepBrowserOpenOnFailure = false,
+	    onLog,
+	    onScreenshot,
 	  } = options;
 
   const logs: any[] = [];
@@ -1637,14 +2513,38 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
 	  let page: Page | null = null;
 	  let keepBrowserOpen = false;
 
+  async function pushLog(message: string) {
+    const entry = nowLog(message);
+    logs.push(entry);
+    try {
+      await onLog?.(entry);
+    } catch {
+      // Progress persistence should never stop the browser automation itself.
+    }
+    return entry;
+  }
+
+  async function capture(name: string) {
+    if (!page) return null;
+    const shot = await screenshot(page, jobId, name);
+    let nextShot = shot;
+    try {
+      nextShot = (await onScreenshot?.(shot)) || shot;
+    } catch {
+      nextShot = shot;
+    }
+    screenshots.push(nextShot);
+    return nextShot;
+  }
+
   try {
-    logs.push(nowLog("Preparing receipt PDF for upload."));
+    await pushLog("Preparing receipt PDF for upload.");
 
     const finalReceiptPdfPath =
       receiptPdfPath || (await ensureReceiptPdfInTmp(payload));
 
-    logs.push(nowLog(`Receipt PDF ready at ${finalReceiptPdfPath}.`));
-    logs.push(nowLog("Launching Safelite worker browser."));
+    await pushLog(`Receipt PDF ready at ${finalReceiptPdfPath}.`);
+    await pushLog("Launching Safelite worker browser.");
 
     browser = await chromium.launch({
       headless,
@@ -1669,9 +2569,9 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
 
     await wait(2500);
 
-    screenshots.push(await screenshot(page, jobId, "opened-safelite"));
+    await capture("opened-safelite");
 
-    logs.push(nowLog("Safelite opened. Looking for Submit invoice path."));
+    await pushLog("Safelite opened. Looking for Submit invoice path.");
 
     const submitInvoiceVisible = await page
       .getByText("Submit invoice", { exact: false })
@@ -1680,28 +2580,26 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
       .catch(() => false);
 
     if (!submitInvoiceVisible) {
-      screenshots.push(await screenshot(page, jobId, "needs-login"));
+      await capture("needs-login");
+      await pushLog("Submit invoice path not visible. Login/session may be required.");
 
       return {
         ok: false,
         status: "needs_login",
-        logs: [
-          ...logs,
-          nowLog("Submit invoice path not visible. Login/session may be required."),
-        ],
+        logs,
         screenshots,
       };
     }
 
-    logs.push(nowLog("Clicking Submit invoice."));
+    await pushLog("Clicking Submit invoice.");
 
     await clickButtonByText(page, "Submit invoice");
     await wait(2500);
     await page.waitForLoadState("domcontentloaded").catch(() => {});
 
-    screenshots.push(await screenshot(page, jobId, "submit-invoice-page"));
+    await capture("submit-invoice-page");
 
-    logs.push(nowLog("Filling shop number and referral number."));
+    await pushLog("Filling shop number and referral number.");
 
     const filledShop = await fillFirst(
       page,
@@ -1716,7 +2614,7 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
     );
 
     if (!filledShop || !filledReferral) {
-      screenshots.push(await screenshot(page, jobId, "missing-shop-or-referral-field"));
+      await capture("missing-shop-or-referral-field");
 
       return {
         ok: false,
@@ -1733,52 +2631,48 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
       "shop user",
     ]);
 
-    screenshots.push(await screenshot(page, jobId, "shop-referral-filled"));
+    await capture("shop-referral-filled");
 
-    logs.push(nowLog("Continuing to Create Invoice."));
+    await pushLog("Continuing to Create Invoice.");
 
     await clickButtonByText(page, "Continue");
     await wait(4000);
     await page.waitForLoadState("domcontentloaded").catch(() => {});
 
-    screenshots.push(await screenshot(page, jobId, "create-invoice-page-before-fill"));
+    await capture("create-invoice-page-before-fill");
 
-    logs.push(nowLog("Hard filling VIN, invoice number, install date, deductible, and signature."));
+    await pushLog("Hard filling VIN, invoice number, install date, deductible, and signature.");
 
     const invoiceInfoFilled = await fillInvoiceInfo(page, payload);
 
-    screenshots.push(await screenshot(page, jobId, "invoice-info-filled"));
+    await capture("invoice-info-filled");
 
     if (!invoiceInfoFilled) {
+      await pushLog("VIN filled / Invoice filled / Install date filled check failed.");
       return {
         ok: false,
         status: "failed",
         error: "Could not fill VIN, invoice number, or install date.",
-        logs: [
-          ...logs,
-          nowLog("VIN filled / Invoice filled / Install date filled check failed."),
-        ],
+        logs,
         screenshots,
       };
     }
 
-    logs.push(nowLog("Moving to parts/labor page."));
+    await pushLog("Moving to parts/labor page.");
 
     await clickButtonByText(page, "Next");
     await wait(4500);
     await page.waitForLoadState("domcontentloaded").catch(() => {});
 
-    screenshots.push(await screenshot(page, jobId, "parts-page"));
+    await capture("parts-page");
 
 	    const billingAmountDollars = billingAmountFromPayload(payload);
-	    logs.push(
-	      nowLog(`Selecting LABOR Part and entering insurance due amount $${billingAmountDollars}.`)
-	    );
+	    await pushLog(`Selecting LABOR Part and entering insurance due amount $${billingAmountDollars}.`);
 
 	    const laborFilled = await addLaborPart(page, billingAmountDollars);
 	    const taxFilled = await fillSalesTaxZero(page);
 
-	    screenshots.push(await screenshot(page, jobId, "labor-filled"));
+	    await capture("labor-filled");
 
 	    if (!laborFilled) {
 	      return {
@@ -1800,22 +2694,23 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
 	      };
 	    }
 
-	    logs.push(nowLog("Moving to document upload page."));
+	    await pushLog("Moving to document upload page.");
 
 	    await clickButtonByText(page, "Next");
 	    await wait(4000);
 	    await page.waitForLoadState("domcontentloaded").catch(() => {});
 
-	    screenshots.push(await screenshot(page, jobId, "upload-page"));
+	    await capture("upload-page");
 
 	    const partsErrors = await readSafeliteValidationErrors(page);
 	    if (partsErrors.length > 0) {
-	      screenshots.push(await screenshot(page, jobId, "parts-validation-errors"));
+	      await capture("parts-validation-errors");
+        await pushLog(`Safelite validation errors: ${partsErrors.join(" | ")}`);
 	      return {
 	        ok: false,
 	        status: "failed",
 	        error: `Safelite rejected the parts/labor page: ${partsErrors.join(" ")}`,
-	        logs: [...logs, nowLog(`Safelite validation errors: ${partsErrors.join(" | ")}`)],
+	        logs,
 	        screenshots,
 	      };
 	    }
@@ -1829,7 +2724,7 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
 	        .catch(() => false));
 
 	    if (!uploadReady) {
-	      screenshots.push(await screenshot(page, jobId, "upload-page-not-ready"));
+	      await capture("upload-page-not-ready");
 	      return {
 	        ok: false,
 	        status: "failed",
@@ -1839,29 +2734,32 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
 	      };
 	    }
 
-	    logs.push(nowLog("Uploading receipt PDF as Work Order."));
+	    await pushLog("Uploading receipt PDF as Work Order.");
 
 	    const workOrderUploaded = await uploadWorkOrder(
 	      page,
 	      finalReceiptPdfPath,
-	      payload.documentType
+	      payload.documentType,
+        {
+          log: pushLog,
+          capture,
+        }
 	    );
 
-	    screenshots.push(await screenshot(page, jobId, "receipt-uploaded"));
+	    await capture("receipt-uploaded");
 
 	    if (!workOrderUploaded) {
+	      await capture("document-type-failed");
 	      keepBrowserOpen = keepBrowserOpenOnFailure && !headless;
+        await pushLog("Could not verify Work Order document type after upload.");
+        if (keepBrowserOpen) {
+          await pushLog("Browser left open for admin review after failure.");
+        }
 	      return {
 	        ok: false,
 	        status: "failed",
 	        error: "Could not set uploaded document type to Work Order.",
-	        logs: [
-            ...logs,
-            nowLog("Could not verify Work Order document type after upload."),
-            ...(keepBrowserOpen
-              ? [nowLog("Browser left open for admin review after failure.")]
-              : []),
-          ],
+	        logs,
 	        screenshots,
           browserLeftOpen: keepBrowserOpen,
 	      };
@@ -1869,47 +2767,122 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
 
 	    if (!allowFinalSubmit) {
 	      keepBrowserOpen = keepBrowserOpenOnReady && !headless;
+        await pushLog("All fields completed and receipt uploaded.");
+        await pushLog("Final submit blocked because allowFinalSubmit=false.");
+        if (keepBrowserOpen) {
+          await pushLog("Browser left open for admin review and manual Submit.");
+        }
 	      return {
 	        ok: true,
 	        status: "ready_for_manual_submit",
-	        logs: [
-	          ...logs,
-	          nowLog("All fields completed and receipt uploaded."),
-	          nowLog("Final submit blocked because allowFinalSubmit=false."),
-	          ...(keepBrowserOpen
-	            ? [nowLog("Browser left open for admin review and manual Submit.")]
-	            : []),
-	        ],
+	        logs,
 	        screenshots,
 	        browserLeftOpen: keepBrowserOpen,
 	      };
 	    }
 
-    logs.push(nowLog("Submitting Safelite invoice."));
+    await pushLog("Submitting Safelite invoice.");
+    await capture("before-final-submit");
 
 	    await clickButtonByText(page, "Submit");
 	    await wait(7000);
 	    await page.waitForLoadState("domcontentloaded").catch(() => {});
 
-	    screenshots.push(await screenshot(page, jobId, "submitted"));
+      await capture("after-final-submit");
+	    await capture("submitted");
 
-	    const finalText = await page.locator("body").innerText().catch(() => "");
-	    const submitErrors = await readSafeliteValidationErrors(page);
+	    let finalText = await page.locator("body").innerText().catch(() => "");
+	    let submitErrors = await readSafeliteValidationErrors(page);
+
+      const documentTypeRejected = submitErrors.some((line) =>
+        String(line).toLowerCase().includes("document type")
+      );
+
+      if (documentTypeRejected) {
+        await pushLog("Safelite asked for document type again; reselecting Work Order and retrying submit.");
+        const retryCustomDocumentType = await clickCustomUploadedDocumentType(
+          page,
+          payload.documentType,
+          path.basename(finalReceiptPdfPath)
+        ).catch(() => false);
+
+        const retryDocumentType = retryCustomDocumentType
+          ? {
+              ok: true,
+              chosenIndex: null,
+              reason: "",
+              selectedText: payload.documentType,
+            }
+          : await setDocumentTypeOnUploadedRowSelect(
+          page,
+          payload.documentType,
+          path.basename(finalReceiptPdfPath)
+        ).catch((e: any) => ({
+            ok: false,
+            visibleSelectCount: 0,
+            chosenIndex: null,
+            chosenScore: 0,
+            selectedText: "",
+            optionTexts: [],
+            context: "",
+            reason: e?.message || "Document type retry failed.",
+          }));
+
+        await pushLog(
+          retryDocumentType.ok
+            ? retryCustomDocumentType
+              ? `Reselected ${payload.documentType} from Safelite custom document type dropdown.`
+              : `Reselected ${payload.documentType} on uploaded document select #${retryDocumentType.chosenIndex}.`
+            : `Document type retry did not stick before final submit retry: ${
+                retryDocumentType.reason || retryDocumentType.selectedText || "unknown"
+              }`
+        );
+
+        if (!retryDocumentType.ok) {
+          await selectDocumentType(page, payload.documentType);
+        }
+
+        await capture("document-type-reselected-before-submit");
+        await capture("before-final-submit-retry");
+        await clickButtonByText(page, "Submit");
+        await wait(7000);
+        await page.waitForLoadState("domcontentloaded").catch(() => {});
+        await capture("after-final-submit-retry");
+        await capture("submitted-after-document-type-retry");
+        finalText = await page.locator("body").innerText().catch(() => "");
+        submitErrors = await readSafeliteValidationErrors(page);
+      }
+
+      const postSubmitRequiredInfoReset = isPostSubmitRequiredInfoReset(finalText, submitErrors);
+      if (postSubmitRequiredInfoReset) {
+        await pushLog(
+          "Safelite showed a post-submit required information reset page; treating as submitted because final submit completed."
+        );
+        submitErrors = [];
+      }
 
 	    if (submitErrors.length > 0) {
-	      screenshots.push(await screenshot(page, jobId, "submit-validation-errors"));
+        await wait(500);
+        const errorScreenshot =
+          (await capture("final-submit-error").catch(() => null)) ||
+          (await capture("submit-validation-errors").catch(() => null));
+        if (errorScreenshot) {
+          await pushLog(
+            `Captured Safelite final submit error screenshot: ${
+              errorScreenshot.name || "final-submit-error"
+            }.`
+          );
+        }
 	      keepBrowserOpen = keepBrowserOpenOnFailure && !headless;
+        await pushLog(`Safelite final submit errors: ${submitErrors.join(" | ")}`);
+        if (keepBrowserOpen) {
+          await pushLog("Browser left open for admin review after failure.");
+        }
 	      return {
 	        ok: false,
 	        status: "failed",
 	        error: `Safelite rejected final submit: ${submitErrors.join(" ")}`,
-	        logs: [
-            ...logs,
-            nowLog(`Safelite final submit errors: ${submitErrors.join(" | ")}`),
-            ...(keepBrowserOpen
-              ? [nowLog("Browser left open for admin review after failure.")]
-              : []),
-          ],
+	        logs,
 	        screenshots,
           browserLeftOpen: keepBrowserOpen,
 	      };
@@ -1918,39 +2891,34 @@ export async function runSafeliteBillingWorker(options: RunOptions) {
 	    const confirmationMatch = finalText.match(
 	      /(?:confirmation|invoice)(?:\s+number|\s+#|[:#\s])+([A-Z0-9-]+)/i
 	    );
+      await pushLog(
+        confirmationMatch?.[1]
+          ? `Safelite invoice submitted. Confirmation: ${confirmationMatch[1]}.`
+          : "Safelite invoice submitted."
+      );
 
 	    return {
 	      ok: true,
 	      status: "submitted",
 	      confirmationNumber: confirmationMatch?.[1] ?? null,
-	      logs: [
-	        ...logs,
-	        nowLog(
-	          confirmationMatch?.[1]
-	            ? `Safelite invoice submitted. Confirmation: ${confirmationMatch[1]}.`
-	            : "Safelite invoice submitted."
-	        ),
-	      ],
+	      logs,
 	      screenshots,
 	    };
   } catch (e: any) {
     if (page) {
-      const errorScreenshot = await screenshot(page, jobId, "worker-error").catch(() => null);
-      if (errorScreenshot) screenshots.push(errorScreenshot);
+      await capture("worker-error").catch(() => null);
     }
     keepBrowserOpen = keepBrowserOpenOnFailure && !headless && !!browser;
+    await pushLog(e?.message || "Safelite worker failed.");
+    if (keepBrowserOpen) {
+      await pushLog("Browser left open for admin review after failure.");
+    }
 
     return {
       ok: false,
       status: "failed",
       error: e?.message || "Safelite worker failed.",
-      logs: [
-        ...logs,
-        nowLog(e?.message || "Safelite worker failed."),
-        ...(keepBrowserOpen
-          ? [nowLog("Browser left open for admin review after failure.")]
-          : []),
-      ],
+      logs,
       screenshots: screenshots.filter(Boolean),
       browserLeftOpen: keepBrowserOpen,
     };

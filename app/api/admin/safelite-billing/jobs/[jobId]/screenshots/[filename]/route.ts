@@ -47,17 +47,25 @@ export async function GET(
 
   const screenshots = Array.isArray(job.screenshots_json) ? job.screenshots_json : [];
   const matchingShot = screenshots.find((shot: any) => {
-    const shotPath = String(shot?.filePath ?? "");
-    const storagePath = String(shot?.storage_path ?? "");
-    return path.basename(shotPath || storagePath) === safeFilename;
+    const candidates = [
+      shot?.storage_path,
+      shot?.storagePath,
+      shot?.filePath,
+      shot?.fileName,
+      shot?.filename,
+    ]
+      .map((value) => path.basename(String(value ?? "")))
+      .filter(Boolean);
+
+    return candidates.includes(safeFilename);
   });
 
   if (!matchingShot) {
     return NextResponse.json({ error: "Screenshot is not attached to this job." }, { status: 404 });
   }
 
-  const storageBucket = String(matchingShot.storage_bucket ?? "");
-  const storagePath = String(matchingShot.storage_path ?? "");
+  const storageBucket = String(matchingShot.storage_bucket ?? matchingShot.storageBucket ?? "");
+  const storagePath = String(matchingShot.storage_path ?? matchingShot.storagePath ?? "");
   if (storageBucket && storagePath) {
     const { data, error: downloadError } = await admin.storage
       .from(storageBucket)

@@ -335,10 +335,21 @@ function getInsuranceAdminValidation(row: TechInvoiceRow): InsuranceValidationRe
     Number(row.insurance_due_cents ?? 0) > 0 ||
     safeStr(row.payment_method).toLowerCase().includes("insurance");
 
-  const lineItemUnitPrice =
+  const lineItemUnitPriceRaw =
     Array.isArray(meta.line_items) && meta.line_items[0]?.unit_price_cents != null
       ? Number(meta.line_items[0].unit_price_cents)
       : readInsuranceFlatPriceCentsFromJson(services);
+  const lineItemUnitPrice =
+    Number.isFinite(Number(lineItemUnitPriceRaw)) && Number(lineItemUnitPriceRaw) > 0
+      ? Math.round(Number(lineItemUnitPriceRaw))
+      : null;
+  const invoiceInsuranceDue = Math.round(Number(row.insurance_due_cents ?? 0) || 0);
+  const billingAmountCents =
+    lineItemUnitPrice != null
+      ? lineItemUnitPrice
+      : invoiceInsuranceDue > 0
+        ? invoiceInsuranceDue
+        : null;
 
   const missing: string[] = [];
   const mismatches: string[] = [];
@@ -359,7 +370,7 @@ function getInsuranceAdminValidation(row: TechInvoiceRow): InsuranceValidationRe
   if (!safeStr(meta.vehicle_year).trim()) missing.push("Vehicle year");
   if (!safeStr(meta.vehicle_make).trim()) missing.push("Vehicle make");
   if (!safeStr(meta.vehicle_model).trim()) missing.push("Vehicle model");
-  if (![6500, 7000].includes(Number(lineItemUnitPrice))) missing.push("Line item price");
+  if (billingAmountCents == null) missing.push("Billing amount");
   if (!safeStr(meta.customer_name).trim()) missing.push("Customer name");
   if (!safeStr(meta.customer_address).trim()) missing.push("Customer address");
   if (normalizePhone(meta.customer_phone).length !== 10) missing.push("Customer phone");
@@ -368,13 +379,18 @@ function getInsuranceAdminValidation(row: TechInvoiceRow): InsuranceValidationRe
   if (!safeStr(meta.shop_fed_tax_id).trim()) missing.push("Fed tax ID");
   if (!safeStr(meta.signature_data_url).trim()) missing.push("Signature");
 
-  const expectedInsuranceDue =
-    Number(lineItemUnitPrice) === 6500 || Number(lineItemUnitPrice) === 7000
-      ? Number(lineItemUnitPrice)
-      : Number(row.insurance_due_cents ?? 0);
+  const expectedInsuranceDue = billingAmountCents;
 
-  if (![6500, 7000].includes(Number(row.insurance_due_cents ?? 0))) {
-    mismatches.push("Insurance due must be $65 or $70");
+  if (invoiceInsuranceDue <= 0) {
+    mismatches.push("Insurance due is missing");
+  }
+
+  if (
+    lineItemUnitPrice != null &&
+    invoiceInsuranceDue > 0 &&
+    lineItemUnitPrice !== invoiceInsuranceDue
+  ) {
+    mismatches.push("Line item price should match insurance due");
   }
 
   if (Number(row.customer_due_cents ?? 0) !== 0) {
@@ -404,9 +420,7 @@ function getInsuranceAdminValidation(row: TechInvoiceRow): InsuranceValidationRe
     mismatches,
     meta,
     lineItemUnitPrice:
-      lineItemUnitPrice != null && Number.isFinite(Number(lineItemUnitPrice))
-        ? Number(lineItemUnitPrice)
-        : null,
+      lineItemUnitPrice,
   };
 }
 

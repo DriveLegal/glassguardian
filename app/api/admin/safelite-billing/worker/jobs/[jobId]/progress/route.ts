@@ -6,15 +6,7 @@ import { getAdminSupabaseClient } from "@/lib/admin/apiAuth";
 
 export const runtime = "nodejs";
 
-const ALLOWED_WORKER_STATUSES = new Set([
-  "pending",
-  "running",
-  "needs_invoice_data",
-  "needs_login",
-  "ready_for_manual_submit",
-  "submitted",
-  "failed",
-]);
+const ALLOWED_PROGRESS_STATUSES = new Set(["running"]);
 
 function assertWorkerRequest(req: Request) {
   const expected = process.env.SAFELITE_WORKER_TOKEN?.trim();
@@ -29,23 +21,6 @@ function assertWorkerRequest(req: Request) {
   }
 
   return { ok: true as const };
-}
-
-function finalStatusFromResult(result: any) {
-  const status = String(result?.status ?? "").trim();
-
-  if (status === "needs_login") return "needs_login";
-  if (!result?.ok) return "failed";
-  if (ALLOWED_WORKER_STATUSES.has(status)) return status;
-
-  return "ready_for_manual_submit";
-}
-
-function log(message: string) {
-  return {
-    at: new Date().toISOString(),
-    message,
-  };
 }
 
 function uniqueBy(items: any[], keyFor: (item: any) => string) {
@@ -79,10 +54,9 @@ export async function POST(
     return NextResponse.json({ error: auth.error }, { status: auth.status });
   }
 
-  const admin = getAdminSupabaseClient();
   const { jobId } = await context.params;
   const body = await req.json().catch(() => ({}));
-  const result = body?.result ?? {};
+  const admin = getAdminSupabaseClient();
 
   const { data: job, error: jobError } = await admin
     .from("safelite_billing_jobs")
@@ -98,29 +72,21 @@ export async function POST(
     return NextResponse.json({ error: "Safelite job not found." }, { status: 404 });
   }
 
-  const finalStatus = finalStatusFromResult(result);
   const existingLogs = Array.isArray(job.logs_json) ? job.logs_json : [];
   const existingScreenshots = Array.isArray(job.screenshots_json) ? job.screenshots_json : [];
-  const resultLogs = Array.isArray(result.logs) ? result.logs : [];
-  const screenshots = Array.isArray(body?.screenshots)
-    ? body.screenshots
-    : Array.isArray(result.screenshots)
-      ? result.screenshots
-      : [];
+  const nextLogs = Array.isArray(body?.logs) ? body.logs : [];
+  const nextScreenshots = Array.isArray(body?.screenshots) ? body.screenshots : [];
+  const requestedStatus = String(body?.status ?? "").trim();
+  const nextStatus = ALLOWED_PROGRESS_STATUSES.has(requestedStatus)
+    ? requestedStatus
+    : job.status;
 
   const { data: updatedJob, error: updateError } = await admin
     .from("safelite_billing_jobs")
     .update({
-      status: finalStatus,
-      logs_json: uniqueBy([
-        ...existingLogs,
-        ...resultLogs,
-        log(`Worker completed job with status ${finalStatus}.`),
-      ], logKey),
-      screenshots_json: uniqueBy([...existingScreenshots, ...screenshots], screenshotKey),
-      confirmation_number: result.confirmationNumber ?? null,
-      error_message: result.error ?? null,
-      submitted_at: finalStatus === "submitted" ? new Date().toISOString() : null,
+      status: nextStatus,
+      logs_json: uniqueBy([...existingLogs, ...nextLogs], logKey),
+      screenshots_json: uniqueBy([...existingScreenshots, ...nextScreenshots], screenshotKey),
       updated_at: new Date().toISOString(),
     })
     .eq("id", job.id)

@@ -297,12 +297,12 @@ const SAFELITE_PROGRESS_STAGES = [
   {
     label: "Work Order Uploaded",
     percent: 88,
-    matches: ["uploading receipt", "receipt-uploaded", "document upload"],
+    matches: ["uploading receipt", "receipt-uploaded", "document upload", "document type"],
   },
   {
     label: "Submitted",
     percent: 100,
-    matches: ["submitted", "completed job with status submitted"],
+    matches: ["safelite invoice submitted", "completed job with status submitted"],
   },
 ];
 
@@ -322,7 +322,8 @@ function formatDurationShort(ms: number) {
 function buildSafeliteProgress(job: SafeliteBillingJobRow | null | undefined) {
   if (!job) return null;
 
-  const status = normStatus(job.status);
+  const status = readSafeliteDisplayStatus(job);
+  const correctedSubmitted = looksLikePostSubmitRequiredInfoReset(job);
   const logs = Array.isArray(job.logs_json) ? job.logs_json : [];
   const logText = logs
     .map((entry: any) => String(entry?.message ?? "").toLowerCase())
@@ -403,9 +404,170 @@ function buildSafeliteProgress(job: SafeliteBillingJobRow | null | undefined) {
       status === "submitted"
         ? "Safelite submission finished and proof is attached below."
         : "Worker progress updates automatically as each Safelite step completes.",
-    latestLog: logs[logs.length - 1]?.message || currentStage.label,
+    latestLog: correctedSubmitted
+      ? "Safelite submission was verified from the final submit flow."
+      : logs[logs.length - 1]?.message || currentStage.label,
     logs,
   };
+}
+
+function safeliteLogText(job: SafeliteBillingJobRow | null | undefined) {
+  const logs = Array.isArray(job?.logs_json) ? job?.logs_json : [];
+  return logs.map((entry: any) => String(entry?.message ?? "").toLowerCase()).join("\n");
+}
+
+function safeliteScreenshotNames(job: SafeliteBillingJobRow | null | undefined) {
+  const screenshots = Array.isArray(job?.screenshots_json) ? job?.screenshots_json : [];
+  return screenshots.map((shot: any) => screenshotName(shot));
+}
+
+function looksLikePostSubmitRequiredInfoReset(job: SafeliteBillingJobRow | null | undefined) {
+  if (!job || normStatus(job.status) !== "failed") return false;
+
+  const logText = safeliteLogText(job);
+  const errorText = String(job.error_message ?? "").toLowerCase();
+  const combined = `${logText}\n${errorText}`;
+
+  if (!combined.includes("submitting safelite invoice")) return false;
+  if (!combined.includes("required information")) return false;
+
+  const nonResetErrors = [
+    "document type is required",
+    "tax field is required",
+    "invoice must contain at least one line item",
+    "invoiced amount is less than deductible",
+    "could not",
+  ];
+
+  if (nonResetErrors.some((needle) => combined.includes(needle))) return false;
+
+  const names = safeliteScreenshotNames(job);
+  return names.some((name) =>
+    [
+      "after-final-submit",
+      "after-final-submit-retry",
+      "submitted",
+      "submitted-after-document-type-retry",
+      "submit-validation-errors",
+      "final-submit-error",
+    ].some((needle) => name.includes(needle))
+  );
+}
+
+function readSafeliteDisplayStatus(job: SafeliteBillingJobRow | null | undefined) {
+  if (looksLikePostSubmitRequiredInfoReset(job)) return "submitted";
+  return normStatus(job?.status);
+}
+
+function screenshotName(shot: any) {
+  return String(shot?.name ?? "").toLowerCase();
+}
+
+function pickSafeliteProofScreenshot(job: SafeliteBillingJobRow | null | undefined) {
+  if (!job) return null;
+
+  const screenshots = Array.isArray(job.screenshots_json) ? job.screenshots_json : [];
+  if (!screenshots.length) return null;
+
+  const newest = [...screenshots].reverse();
+  const status = readSafeliteDisplayStatus(job);
+
+  if (status === "submitted") {
+    return (
+      newest.find((shot: any) => {
+        const name = screenshotName(shot);
+        return (
+          name.includes("after-final-submit") ||
+          name.includes("submitted-after-document-type-retry") ||
+          name === "submitted"
+        );
+      }) ||
+      newest.find((shot: any) => screenshotName(shot).includes("receipt-uploaded")) ||
+      newest[0] ||
+      null
+    );
+  }
+
+  const errorLikeScreenshot = newest.find((shot: any) => {
+    const name = screenshotName(shot);
+    return (
+      name.includes("error") ||
+      name.includes("failed") ||
+      name.includes("failure") ||
+      name.includes("validation") ||
+      name.includes("rejected")
+    );
+  });
+
+  return (
+    errorLikeScreenshot ||
+    newest.find((shot: any) => {
+      const name = screenshotName(shot);
+      return [
+        "final-submit-error",
+        "submit-validation-errors",
+        "worker-error",
+        "document-type-failed",
+        "parts-validation-errors",
+        "submitted-after-document-type-retry",
+        "document-type-reselected-before-submit",
+        "submitted",
+        "receipt-uploaded",
+        "upload-page",
+        "labor-filled",
+      ].includes(name);
+    }) ||
+    newest[0] ||
+    null
+  );
+}
+
+function pickSafeliteScreenshotByNames(
+  job: SafeliteBillingJobRow | null | undefined,
+  names: string[]
+) {
+  if (!job) return null;
+
+  const screenshots = Array.isArray(job.screenshots_json) ? job.screenshots_json : [];
+  if (!screenshots.length) return null;
+
+  const wanted = names.map((name) => name.toLowerCase());
+  return (
+    [...screenshots]
+      .reverse()
+      .find((shot: any) => {
+        const name = screenshotName(shot);
+        return wanted.some((item) => name === item || name.includes(item));
+      }) || null
+  );
+}
+
+function readScreenshotDirectUrl(shot: any) {
+  return firstNonBlank(
+    shot?.signedUrl,
+    shot?.signed_url,
+    shot?.publicUrl,
+    shot?.public_url,
+    shot?.url
+  );
+}
+
+function readScreenshotArtifactFilename(shot: any) {
+  const candidates = [
+    shot?.storage_path,
+    shot?.storagePath,
+    shot?.filePath,
+    shot?.fileName,
+    shot?.filename,
+  ];
+
+  for (const value of candidates) {
+    const parts = String(value ?? "").split("/").filter(Boolean);
+    const filename = parts[parts.length - 1] || "";
+    if (filename.endsWith(".png")) return filename;
+  }
+
+  return "";
 }
 
 function addYears(dateStr: string | null | undefined, years: number): string | null {
@@ -939,6 +1101,59 @@ export default function AdminInvoiceDetailPage() {
   const [insuranceFormTouched, setInsuranceFormTouched] = React.useState(false);
   const [safeliteScreenshotUrl, setSafeliteScreenshotUrl] = React.useState<string | null>(null);
   const [safeliteScreenshotName, setSafeliteScreenshotName] = React.useState("");
+  const [safeliteScreenshotError, setSafeliteScreenshotError] = React.useState("");
+  const [safeliteBeforeSubmitUrl, setSafeliteBeforeSubmitUrl] = React.useState<string | null>(null);
+  const [safeliteBeforeSubmitName, setSafeliteBeforeSubmitName] = React.useState("");
+  const [safeliteAfterSubmitUrl, setSafeliteAfterSubmitUrl] = React.useState<string | null>(null);
+  const [safeliteAfterSubmitName, setSafeliteAfterSubmitName] = React.useState("");
+
+  const safeliteScreenshotsFingerprint = React.useMemo(
+    () => JSON.stringify(safeliteJob?.screenshots_json ?? []),
+    [safeliteJob?.screenshots_json]
+  );
+
+  const safeliteProofScreenshot = React.useMemo(
+    () => pickSafeliteProofScreenshot(safeliteJob),
+    [safeliteJob?.id, safeliteJob?.status, safeliteScreenshotsFingerprint]
+  );
+
+  const safeliteBeforeSubmitScreenshot = React.useMemo(
+    () =>
+      pickSafeliteScreenshotByNames(safeliteJob, [
+        "before-final-submit-retry",
+        "before-final-submit",
+        "work-order-document-type-selected",
+        "receipt-uploaded",
+      ]),
+    [safeliteJob?.id, safeliteJob?.status, safeliteScreenshotsFingerprint]
+  );
+
+  const safeliteAfterSubmitScreenshot = React.useMemo(
+    () =>
+      pickSafeliteScreenshotByNames(safeliteJob, [
+        "after-final-submit-retry",
+        "after-final-submit",
+        "submitted-after-document-type-retry",
+        "submitted",
+        "final-submit-error",
+        "submit-validation-errors",
+      ]),
+    [safeliteJob?.id, safeliteJob?.status, safeliteScreenshotsFingerprint]
+  );
+
+  const safeliteProofScreenshotKey = React.useMemo(() => {
+    if (!safeliteProofScreenshot) return "";
+    return [
+      safeliteJob?.id ?? "",
+      safeliteJob?.status ?? "",
+      safeliteProofScreenshot?.name ?? "",
+      safeliteProofScreenshot?.at ?? "",
+      safeliteProofScreenshot?.storage_path ?? "",
+      safeliteProofScreenshot?.storagePath ?? "",
+      safeliteProofScreenshot?.filePath ?? "",
+      safeliteProofScreenshot?.fileName ?? "",
+    ].join("|");
+  }, [safeliteJob?.id, safeliteJob?.status, safeliteProofScreenshot]);
 
   React.useEffect(() => {
     let objectUrl: string | null = null;
@@ -947,39 +1162,40 @@ export default function AdminInvoiceDetailPage() {
     async function loadScreenshot() {
       setSafeliteScreenshotUrl(null);
       setSafeliteScreenshotName("");
+      setSafeliteScreenshotError("");
 
       const job = safeliteJob;
       if (!job) return;
 
-      const screenshots = Array.isArray(job.screenshots_json)
-        ? job.screenshots_json
-        : [];
-      if (!screenshots.length) return;
+      const screenshot = safeliteProofScreenshot;
+      if (!screenshot) {
+        setSafeliteScreenshotError(
+          readSafeliteDisplayStatus(job) === "failed"
+            ? "No Safelite error screenshot is attached to this job yet."
+            : "No Safelite screenshot is attached to this job yet."
+        );
+        return;
+      }
 
-      const screenshot =
-        job.status === "submitted"
-          ? [...screenshots]
-              .reverse()
-              .find((shot: any) => String(shot?.name ?? "") === "submitted") ||
-            [...screenshots].reverse()[0] ||
-            null
-          : [...screenshots]
-              .reverse()
-              .find((shot: any) =>
-                ["receipt-uploaded", "upload-page", "parts-validation-errors", "labor-filled"].includes(
-                  String(shot?.name ?? "")
-                )
-              ) ||
-            [...screenshots].reverse()[0] ||
-            null;
+      const directUrl = readScreenshotDirectUrl(screenshot);
+      if (directUrl) {
+        setSafeliteScreenshotName(String(screenshot?.name ?? "Safelite screenshot"));
+        setSafeliteScreenshotUrl(directUrl);
+        return;
+      }
 
-      const artifactPath = String(screenshot?.storage_path ?? screenshot?.filePath ?? "");
-      const filename = artifactPath.split("/").filter(Boolean).pop();
-      if (!job.id || !filename) return;
+      const filename = readScreenshotArtifactFilename(screenshot);
+      if (!job.id || !filename) {
+        setSafeliteScreenshotError("Screenshot artifact metadata is missing a PNG filename.");
+        return;
+      }
 
       const { data: sessionData } = await supabaseClient.auth.getSession();
       const token = sessionData.session?.access_token;
-      if (!token) return;
+      if (!token) {
+        setSafeliteScreenshotError("Admin session is required to load the Safelite screenshot.");
+        return;
+      }
 
       const res = await fetch(
         `/api/admin/safelite-billing/jobs/${encodeURIComponent(job.id)}/screenshots/${encodeURIComponent(filename)}`,
@@ -989,23 +1205,115 @@ export default function AdminInvoiceDetailPage() {
         }
       );
 
-      if (!res.ok) return;
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        if (!cancelled) {
+          setSafeliteScreenshotName(String(screenshot?.name ?? "Safelite screenshot"));
+          setSafeliteScreenshotError(
+            body.error || `Unable to load Safelite screenshot (${res.status}).`
+          );
+        }
+        return;
+      }
 
       const blob = await res.blob();
       if (cancelled) return;
 
       objectUrl = URL.createObjectURL(blob);
-      setSafeliteScreenshotName(String(screenshot?.name ?? "latest screenshot"));
+      setSafeliteScreenshotName(String(screenshot?.name ?? "Safelite screenshot"));
       setSafeliteScreenshotUrl(objectUrl);
     }
 
-    loadScreenshot().catch(() => {});
+    loadScreenshot().catch((e: any) => {
+      if (!cancelled) {
+        setSafeliteScreenshotError(e?.message || "Unable to load Safelite screenshot.");
+      }
+    });
 
     return () => {
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [safeliteJob]);
+  }, [safeliteJob?.id, safeliteProofScreenshotKey]);
+
+  React.useEffect(() => {
+    let beforeObjectUrl: string | null = null;
+    let afterObjectUrl: string | null = null;
+    let cancelled = false;
+
+    async function loadScreenshotBlobUrl(screenshot: any) {
+      const job = safeliteJob;
+      if (!job || !screenshot) return null;
+
+      const directUrl = readScreenshotDirectUrl(screenshot);
+      if (directUrl) return directUrl;
+
+      const filename = readScreenshotArtifactFilename(screenshot);
+      if (!job.id || !filename) return null;
+
+      const { data: sessionData } = await supabaseClient.auth.getSession();
+      const token = sessionData.session?.access_token;
+      if (!token) return null;
+
+      const res = await fetch(
+        `/api/admin/safelite-billing/jobs/${encodeURIComponent(job.id)}/screenshots/${encodeURIComponent(filename)}`,
+        {
+          cache: "no-store",
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      if (!res.ok) return null;
+
+      const blob = await res.blob();
+      return URL.createObjectURL(blob);
+    }
+
+    async function loadSubmitProofs() {
+      setSafeliteBeforeSubmitUrl(null);
+      setSafeliteBeforeSubmitName("");
+      setSafeliteAfterSubmitUrl(null);
+      setSafeliteAfterSubmitName("");
+
+      if (!safeliteJob || !["submitted", "failed"].includes(normStatus(safeliteJob.status))) {
+        return;
+      }
+
+      if (safeliteBeforeSubmitScreenshot) {
+        beforeObjectUrl = await loadScreenshotBlobUrl(safeliteBeforeSubmitScreenshot);
+        if (!cancelled && beforeObjectUrl) {
+          setSafeliteBeforeSubmitName(
+            String(safeliteBeforeSubmitScreenshot?.name ?? "Before final submit")
+          );
+          setSafeliteBeforeSubmitUrl(beforeObjectUrl);
+        }
+      }
+
+      if (safeliteAfterSubmitScreenshot) {
+        afterObjectUrl = await loadScreenshotBlobUrl(safeliteAfterSubmitScreenshot);
+        if (!cancelled && afterObjectUrl) {
+          setSafeliteAfterSubmitName(
+            String(safeliteAfterSubmitScreenshot?.name ?? "After final submit")
+          );
+          setSafeliteAfterSubmitUrl(afterObjectUrl);
+        }
+      }
+    }
+
+    loadSubmitProofs().catch(() => {});
+
+    return () => {
+      cancelled = true;
+      if (beforeObjectUrl?.startsWith("blob:")) URL.revokeObjectURL(beforeObjectUrl);
+      if (afterObjectUrl?.startsWith("blob:")) URL.revokeObjectURL(afterObjectUrl);
+    };
+  }, [
+    safeliteJob?.id,
+    safeliteJob?.status,
+    safeliteScreenshotsFingerprint,
+    safeliteBeforeSubmitScreenshot,
+    safeliteAfterSubmitScreenshot,
+  ]);
 
   React.useEffect(() => {
     if (!invoice) return;
@@ -1458,6 +1766,8 @@ export default function AdminInvoiceDetailPage() {
     ? lockedDateOfLossDisplay
     : editDateOfLossDisplay;
 
+  const safeliteDisplayStatus = readSafeliteDisplayStatus(safeliteJob);
+  const safeliteLooksBackfilledSubmitted = looksLikePostSubmitRequiredInfoReset(safeliteJob);
   const safeliteProgress = buildSafeliteProgress(safeliteJob);
 
   const receiptPrintHref = `/admin/portal/invoices/${invoice.id}/receipt?autoprint=1`;
@@ -1609,16 +1919,16 @@ export default function AdminInvoiceDetailPage() {
   <Badge
     className={cx(
       "border text-xs px-3 py-1 tracking-[0.16em] uppercase backdrop-blur-xl",
-      safeliteJob.status === "submitted"
+      safeliteDisplayStatus === "submitted"
         ? "bg-emerald-500/12 text-emerald-100 border-emerald-400/35"
-        : safeliteJob.status === "failed"
+        : safeliteDisplayStatus === "failed"
           ? "bg-red-500/12 text-red-100 border-red-400/35"
-          : safeliteJob.status === "needs_login"
+          : safeliteDisplayStatus === "needs_login"
             ? "bg-sky-500/12 text-sky-100 border-sky-300/35"
             : "bg-amber-400/12 text-amber-100 border-amber-300/28"
     )}
   >
-    Safelite: {String(safeliteJob.status ?? "pending").toUpperCase()}
+    Safelite: {String(safeliteDisplayStatus || "pending").toUpperCase()}
     {isFetchingSafeliteJob ? " · SYNCING" : ""}
   </Badge>
 ) : null}
@@ -1896,7 +2206,10 @@ export default function AdminInvoiceDetailPage() {
                     Job Details
                   </div>
                   <div className="mt-2 space-y-1">
-                    <div>Status: {String(safeliteJob?.status || "pending").toUpperCase()}</div>
+                    <div>Status: {String(safeliteDisplayStatus || "pending").toUpperCase()}</div>
+                    {safeliteLooksBackfilledSubmitted ? (
+                      <div>Original worker status: {String(safeliteJob?.status || "").toUpperCase()}</div>
+                    ) : null}
                     <div>Updated: {formatDT(safeliteJob?.updated_at)}</div>
                     <div className="break-all">Job: {safeliteJob?.id}</div>
                   </div>
@@ -1908,7 +2221,7 @@ export default function AdminInvoiceDetailPage() {
                   Worker Timeline
                 </div>
                 <div className="space-y-2">
-                  {safeliteProgress.logs.slice(-6).map((entry: any, idx: number) => (
+                  {safeliteProgress.logs.slice(-12).map((entry: any, idx: number) => (
                     <div
                       key={`${String(entry?.at || "")}-${idx}`}
                       className="grid gap-1 text-xs text-slate-300 md:grid-cols-[155px_1fr]"
@@ -1923,23 +2236,23 @@ export default function AdminInvoiceDetailPage() {
           </Card>
         ) : null}
 
-	        {safeliteJob?.status === "submitted" || safeliteJob?.status === "failed" ? (
+	        {safeliteDisplayStatus === "submitted" || safeliteDisplayStatus === "failed" ? (
 	          <Card
               className={cx(
                 "overflow-hidden backdrop-blur-2xl shadow-[0_24px_70px_rgba(0,0,0,0.36)] print:hidden",
-                safeliteJob?.status === "submitted"
+                safeliteDisplayStatus === "submitted"
                   ? "border border-emerald-400/25 bg-emerald-500/10"
                   : "border border-red-400/25 bg-red-500/10"
               )}
             >
 	            <CardHeader className="pb-3">
 	              <CardTitle className="flex items-center gap-2 text-slate-50">
-	                {safeliteJob?.status === "submitted" ? (
+	                {safeliteDisplayStatus === "submitted" ? (
                     <CheckCircle className="h-5 w-5 text-emerald-300" />
                   ) : (
                     <X className="h-5 w-5 text-red-300" />
                   )}
-	                {safeliteJob?.status === "submitted"
+	                {safeliteDisplayStatus === "submitted"
                     ? "Safelite Submission Proof"
                     : "Safelite Failure Screenshot"}
 	              </CardTitle>
@@ -1948,12 +2261,14 @@ export default function AdminInvoiceDetailPage() {
 	              <div
                   className={cx(
                     "flex flex-wrap items-center gap-3 text-sm",
-                    safeliteJob?.status === "submitted" ? "text-emerald-100" : "text-red-100"
+                    safeliteDisplayStatus === "submitted" ? "text-emerald-100" : "text-red-100"
                   )}
                 >
 	                <span>
-                    {safeliteJob?.status === "submitted"
-                      ? "Submitted successfully."
+                    {safeliteDisplayStatus === "submitted"
+                      ? safeliteLooksBackfilledSubmitted
+                        ? "Submitted successfully. This older worker row was corrected from its post-submit reset-page failure."
+                        : "Submitted successfully."
                       : safeliteJob?.error_message || "Safelite automation failed before final submit."}
                   </span>
 	                {safeliteJob?.confirmation_number ? (
@@ -1969,21 +2284,60 @@ export default function AdminInvoiceDetailPage() {
                   </div>
                 ) : null}
 
-	              {safeliteScreenshotUrl ? (
-	                <div className="overflow-hidden rounded-xl border border-white/10 bg-black/20">
-	                  <img
-	                    src={safeliteScreenshotUrl}
-	                    alt="Safelite worker screenshot"
-	                    className="block max-h-[520px] w-full object-contain"
-	                  />
-	                </div>
-	              ) : (
-	                <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-slate-300">
-	                  {safeliteJob?.status === "submitted"
-                      ? "Loading submission screenshot..."
-                      : "No failure screenshot was attached yet."}
-	                </div>
-	              )}
+                {safeliteBeforeSubmitUrl || safeliteAfterSubmitUrl ? (
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {safeliteBeforeSubmitUrl ? (
+                      <div className="space-y-2">
+                        <div className="text-[11px] uppercase tracking-[0.18em] text-slate-400">
+                          Before Submit
+                          {safeliteBeforeSubmitName ? `: ${safeliteBeforeSubmitName}` : ""}
+                        </div>
+                        <div className="overflow-hidden rounded-xl border border-white/10 bg-black/20">
+                          <img
+                            src={safeliteBeforeSubmitUrl}
+                            alt="Safelite before final submit screenshot"
+                            className="block max-h-[360px] w-full object-contain"
+                          />
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {safeliteAfterSubmitUrl ? (
+                      <div className="space-y-2">
+                        <div className="text-[11px] uppercase tracking-[0.18em] text-slate-400">
+                          After Submit
+                          {safeliteAfterSubmitName ? `: ${safeliteAfterSubmitName}` : ""}
+                        </div>
+                        <div className="overflow-hidden rounded-xl border border-white/10 bg-black/20">
+                          <img
+                            src={safeliteAfterSubmitUrl}
+                            alt="Safelite after final submit screenshot"
+                            className="block max-h-[360px] w-full object-contain"
+                          />
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {!safeliteBeforeSubmitUrl && !safeliteAfterSubmitUrl ? (
+                  safeliteScreenshotUrl ? (
+                    <div className="overflow-hidden rounded-xl border border-white/10 bg-black/20">
+                      <img
+                        src={safeliteScreenshotUrl}
+                        alt="Safelite worker screenshot"
+                        className="block max-h-[520px] w-full object-contain"
+                      />
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-slate-300">
+                      {safeliteScreenshotError ||
+                        (safeliteDisplayStatus === "submitted"
+                          ? "Loading submission screenshot..."
+                          : "Loading Safelite failure screenshot...")}
+                    </div>
+                  )
+                ) : null}
 	            </CardContent>
 	          </Card>
 	        ) : null}

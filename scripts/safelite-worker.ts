@@ -97,6 +97,8 @@ async function claimJob() {
 }
 
 async function uploadScreenshot(jobId: string, screenshot: any) {
+  if (screenshot?.storage_path || screenshot?.storagePath) return screenshot;
+
   const filePath = String(screenshot?.filePath || "");
   if (!filePath) return screenshot;
 
@@ -128,6 +130,13 @@ async function uploadScreenshot(jobId: string, screenshot: any) {
     ...screenshot,
     ...json.artifact,
   };
+}
+
+async function sendProgress(
+  jobId: string,
+  payload: { logs?: any[]; screenshots?: any[]; status?: string }
+) {
+  return await postJson(`/api/admin/safelite-billing/worker/jobs/${encodeURIComponent(jobId)}/progress`, payload);
 }
 
 async function uploadScreenshots(jobId: string, result: WorkerResult) {
@@ -165,6 +174,23 @@ async function processOneJob() {
       headless,
       allowFinalSubmit,
       keepBrowserOpenOnFailure,
+      onLog: async (entry) => {
+        try {
+          await sendProgress(job.id, { logs: [entry], status: "running" });
+        } catch (e: any) {
+          console.warn(`[safelite-worker] live log update failed: ${e?.message || e}`);
+        }
+      },
+      onScreenshot: async (screenshot) => {
+        try {
+          const uploaded = await uploadScreenshot(job.id, screenshot);
+          await sendProgress(job.id, { screenshots: [uploaded], status: "running" });
+          return uploaded;
+        } catch (e: any) {
+          console.warn(`[safelite-worker] live screenshot update failed: ${e?.message || e}`);
+          return screenshot;
+        }
+      },
     });
   } catch (e: any) {
     result = {
